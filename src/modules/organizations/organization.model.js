@@ -10,7 +10,8 @@ const settingsSchema = new mongoose.Schema({
   receiptPrefix: { type: String, default: '' },
   loanPrefix: { type: String, default: 'P' },
   portalEnabled: { type: Boolean, default: true },
-  portalOtpChannel: enumOf(['sms', 'whatsapp', 'email'], { default: 'email' }),
+  // 'documento': entra solo con su documento (simple). 'codigo': documento + código al correo (más seguro)
+  portalAccess: enumOf(['documento', 'codigo'], { default: 'documento' }),
   allowedRegimes: { type: [String], default: ['formal', 'informal'] },
   // Acogida a la ley de tasa máxima: lo decide el administrador de la plataforma
   legalRateCompliance: {

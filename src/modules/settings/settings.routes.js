@@ -51,7 +51,7 @@ const body = z.object({
     loanPrefix: z.string().trim().max(8).optional(),
     allowedRegimes: z.array(z.enum(['formal', 'informal'])).min(1).optional(),
     portalEnabled: z.boolean().optional(),
-    portalOtpChannel: z.enum(['sms', 'whatsapp', 'email']).optional(),
+    portalAccess: z.enum(['documento', 'codigo']).optional(),
   }).optional(),
 });
 
