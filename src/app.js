@@ -5,7 +5,7 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import { pinoHttp } from 'pino-http';
 import { randomUUID } from 'node:crypto';
-import { corsOrigins, isProd } from './config/env.js';
+import { corsOrigins, isProd, isServerless } from './config/env.js';
 import { sanitize } from './middlewares/sanitize.js';
 import { notFound, errorHandler } from './middlewares/errorHandler.js';
 import api from './routes.js';
@@ -19,7 +19,7 @@ export function createApp() {
 
   app.use(pinoHttp({
     genReqId: (req) => req.headers['x-request-id'] ?? randomUUID(),
-    transport: isProd ? undefined : { target: 'pino-pretty', options: { singleLine: true } },
+    transport: isProd || isServerless ? undefined : { target: 'pino-pretty', options: { singleLine: true } },
     redact: ['req.headers.authorization', 'req.headers.cookie'],
     autoLogging: { ignore: (req) => req.url === '/api/health' },
   }));

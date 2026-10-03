@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { env, isProd } from '../config/env.js';
+import { env, isServerless } from '../config/env.js';
 
 mongoose.set('strictQuery', true);
 // sanitizeFilter queda apagado: también bloquearía los filtros que arma el propio servidor
@@ -7,16 +7,25 @@ mongoose.set('strictQuery', true);
 // con $ del body y zod valida query y params como texto, nunca como objeto.
 mongoose.set('sanitizeFilter', false);
 
-export async function connectDB() {
-  mongoose.connection.on('connected', () => console.log('MongoDB conectado'));
-  mongoose.connection.on('error', (err) => console.error('MongoDB error', err));
-  mongoose.connection.on('disconnected', () => console.warn('MongoDB desconectado'));
+let connecting = null;
+let listeners = false;
 
-  await mongoose.connect(env.MONGODB_URI, {
-    autoIndex: !isProd, // en producción los índices se crean con un script
-    maxPoolSize: 20,
+/** Conecta una sola vez y reutiliza la conexión (necesario en Vercel, donde la función se reutiliza). */
+export async function connectDB() {
+  if (mongoose.connection.readyState === 1) return mongoose.connection;
+  if (!listeners) {
+    listeners = true;
+    mongoose.connection.on('connected', () => console.log('MongoDB conectado'));
+    mongoose.connection.on('error', (err) => console.error('MongoDB error', err.message));
+    mongoose.connection.on('disconnected', () => console.warn('MongoDB desconectado'));
+  }
+  connecting ??= mongoose.connect(env.MONGODB_URI, {
+    autoIndex: env.MONGO_AUTO_INDEX, // crea los índices al arrancar (idempotente)
+    maxPoolSize: isServerless ? 5 : 20,
     serverSelectionTimeoutMS: 10000,
-  });
+  }).catch((err) => { connecting = null; throw err; });
+  await connecting;
+  return mongoose.connection;
 }
 
 export async function disconnectDB() {

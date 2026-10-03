@@ -16,10 +16,23 @@ import settingsRoutes from './modules/settings/settings.routes.js';
 import supportRoutes from './modules/support/support.routes.js';
 import exportRoutes from './modules/exports/export.routes.js';
 import portalRoutes from './modules/portal/portal.routes.js';
+import { env } from './config/env.js';
+import { runDailyAccrual } from './jobs/dailyAccrual.js';
+import { checkSubscriptions } from './jobs/subscriptionCheck.js';
 import adminAuthRoutes from './modules/platform/adminAuth.routes.js';
 import adminRoutes from './modules/platform/admin.routes.js';
 
 const api = Router();
+
+// Vercel Cron llama esto una vez al día con Authorization: Bearer CRON_SECRET
+api.get('/cron/daily', async (req, res) => {
+  if (!env.CRON_SECRET || req.get('authorization') !== `Bearer ${env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'UNAUTHORIZED' });
+  }
+  const accrual = await runDailyAccrual(new Date());
+  const subscriptions = await checkSubscriptions();
+  res.json({ ok: true, accrual: { orgs: accrual.orgs, loans: accrual.loans, errors: accrual.errors.length }, subscriptions });
+});
 
 api.get('/health', (_req, res) => {
   res.json({ ok: true, db: mongoose.connection.readyState === 1 ? 'up' : 'down', time: new Date().toISOString() });

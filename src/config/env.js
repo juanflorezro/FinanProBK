@@ -22,14 +22,20 @@ const schema = z.object({
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_FROM: z.string().optional(),
   SMS_COUNTRY_CODE: z.string().default('+57'),
+  MONGO_AUTO_INDEX: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  CRON_SECRET: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
-  console.error('Variables de entorno inválidas:', parsed.error.flatten().fieldErrors);
+  const detail = parsed.error.flatten().fieldErrors;
+  console.error('Variables de entorno inválidas o faltantes:', detail);
+  // En Vercel no se puede cortar el proceso: se lanza el error para que salga en los logs
+  if (process.env.VERCEL) throw new Error(`Faltan o son inválidas: ${Object.keys(detail).join(', ')}`);
   process.exit(1);
 }
 
 export const env = parsed.data;
 export const isProd = env.NODE_ENV === 'production';
+export const isServerless = Boolean(process.env.VERCEL);
 export const corsOrigins = env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
