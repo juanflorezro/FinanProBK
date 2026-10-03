@@ -2,7 +2,6 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import { env } from '../../config/env.js';
 import { validate } from '../../middlewares/validate.js';
 import { httpError } from '../../utils/errors.js';
@@ -18,6 +17,7 @@ import { Payment } from '../payments/payment.model.js';
 import { getInstallments } from '../loans/loan.service.js';
 import { AuditLog } from '../audit/auditLog.model.js';
 import { PortalChallenge } from './portalChallenge.model.js';
+import { newPortalChallenge, sameCode } from './portal.codes.js';
 
 /**
  * Portal del deudor (cliente de la empresa): consulta de sus préstamos con documento + código.
@@ -31,7 +31,6 @@ const VISIBLE = ['desembolsado', 'al_dia', 'en_mora', 'reestructurado', 'pagado'
 const codeLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'TOO_MANY', message: 'Demasiados intentos. Espera unos minutos.' } });
 const verifyLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'TOO_MANY', message: 'Demasiados intentos. Espera unos minutos.' } });
 
-const hashCode = (id, code) => createHmac('sha256', env.DATA_HASH_SECRET).update(`portal:${id}:${code}`).digest('hex');
 const maskPhone = (p) => { const d = String(p ?? '').replace(/\D/g, ''); return d.length >= 4 ? `***${d.slice(-4)}` : '***'; };
 
 async function loadOrg(req, _res, next) {
@@ -75,31 +74,29 @@ router.post('/request-code', codeLimiter, validate({
   const hash = documentHash(req.org._id, docType, docNumber);
   const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: hash }).select('email phone firstName status').exec()); // .exec() dentro del contexto
 
-  const challenge = new PortalChallenge({ orgId: req.org._id, ip: req.ip, expiresAt: new Date(Date.now() + CODE_MIN * 60_000) });
+  let challenge = new PortalChallenge({ orgId: req.org._id, ip: req.ip, expiresAt: new Date(Date.now() + CODE_MIN * 60_000) });
   let hint = null;
 
   if (borrower && borrower.status !== 'bloqueado') {
-    const recent = await PortalChallenge.findOne({ borrowerId: borrower._id, createdAt: { $gt: new Date(Date.now() - 60_000) } });
+    const recent = await PortalChallenge.findOne({ borrowerId: borrower._id, channel: { $in: ['email', 'sms'] }, createdAt: { $gt: new Date(Date.now() - 60_000) } });
     if (recent) throw httpError(429, 'CODE_COOLDOWN', 'Ya te enviamos un código. Espera un minuto para pedir otro.');
 
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
-    challenge.borrowerId = borrower._id;
-    challenge.codeHash = hashCode(challenge._id, code);
-    const preferSms = req.org.settings?.portalOtpChannel !== 'email' && smsEnabled() && borrower.phone;
-    const text = `${req.org.name}: tu código para consultar tus préstamos es ${code}. Vence en ${CODE_MIN} minutos. No lo compartas.`;
-    if (preferSms) {
-      await sendSms(toE164(borrower.phone), text);
-      challenge.channel = 'sms';
-      hint = `tu celular ${maskPhone(borrower.phone)}`;
-    } else if (borrower.email) {
-      await sendMail({ to: borrower.email, subject: `Tu código de acceso: ${code}`, text, html: `<p>Hola ${borrower.firstName},</p><p>Tu código para consultar tus préstamos con <strong>${req.org.name}</strong> es:</p><p style="font-size:30px;letter-spacing:8px;font-weight:bold">${code}</p><p>Vence en ${CODE_MIN} minutos. No lo compartas con nadie.</p>` });
-      challenge.channel = 'email';
-      hint = `tu correo ${maskEmail(borrower.email)}`;
-    } else if (borrower.phone) {
-      await sendSms(toE164(borrower.phone), text); // en desarrollo sale por consola
-      challenge.channel = 'sms';
-      hint = `tu celular ${maskPhone(borrower.phone)}`;
+    // Solo se usa SMS si el servidor tiene un proveedor configurado (Twilio). Si no, correo.
+    const canSms = smsEnabled() && borrower.phone;
+    const useSms = canSms && (req.org.settings?.portalOtpChannel !== 'email' || !borrower.email);
+    if (useSms || borrower.email) {
+      const made = newPortalChallenge({ orgId: req.org._id, borrowerId: borrower._id, channel: useSms ? 'sms' : 'email', minutes: CODE_MIN, ip: req.ip });
+      challenge = made.challenge;
+      const text = `${req.org.name}: tu código para consultar tus préstamos es ${made.code}. Vence en ${CODE_MIN} minutos. No lo compartas.`;
+      if (useSms) {
+        await sendSms(toE164(borrower.phone), text);
+        hint = `tu celular ${maskPhone(borrower.phone)}`;
+      } else {
+        await sendMail({ to: borrower.email, subject: `Tu código de acceso: ${made.code}`, text, html: `<p>Hola ${borrower.firstName},</p><p>Tu código para consultar tus préstamos con <strong>${req.org.name}</strong> es:</p><p style="font-size:30px;letter-spacing:8px;font-weight:bold">${made.code}</p><p>Vence en ${CODE_MIN} minutos. No lo compartas con nadie.</p>` });
+        hint = `tu correo ${maskEmail(borrower.email)}`;
+      }
     }
+    // Sin correo ni SMS disponible: no se envía nada; la empresa puede generarle un código desde su ficha.
   }
   await challenge.save();
   // Misma respuesta exista o no el documento: nadie puede averiguar quién es cliente
@@ -115,8 +112,7 @@ router.post('/verify', verifyLimiter, validate({
   const invalid = httpError(400, 'CODE_INVALID', 'Código incorrecto o vencido');
   if (!ch || ch.verifiedAt || ch.expiresAt < new Date()) throw invalid;
   if (ch.attempts >= 5) throw httpError(429, 'CODE_TOO_MANY_ATTEMPTS', 'Demasiados intentos. Pide un código nuevo.');
-  const ok = ch.borrowerId && ch.codeHash
-    && timingSafeEqual(Buffer.from(ch.codeHash, 'hex'), Buffer.from(hashCode(ch._id, code), 'hex'));
+  const ok = ch.borrowerId && sameCode(ch, code);
   if (!ok) {
     ch.attempts += 1;
     await ch.save();
@@ -126,6 +122,32 @@ router.post('/verify', verifyLimiter, validate({
   await ch.save();
   const token = jwt.sign({ sub: String(ch.borrowerId), org: String(req.org._id) }, env.JWT_ACCESS_SECRET, { audience: 'portal', expiresIn: SESSION });
   req.borrowerId = ch.borrowerId;
+  await logAccess(req, 'portal.login');
+  res.json({ token, expiresInMinutes: 30 });
+});
+
+router.post('/verify-doc', verifyLimiter, validate({
+  body: z.object({
+    docType: z.enum(['CC', 'CE', 'PPT', 'PAS', 'NIT']),
+    docNumber: z.string().trim().regex(/^[0-9A-Za-z-]{4,20}$/, 'Documento inválido'),
+    code: z.string().trim().regex(/^\d{6}$/, 'El código tiene 6 dígitos'),
+  }),
+}), async (req, res) => {
+  const { docType, docNumber, code } = req.valid.body;
+  const invalid = httpError(400, 'CODE_INVALID', 'Documento o código incorrecto, o el código ya venció');
+  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: documentHash(req.org._id, docType, docNumber) }).select('status').exec());
+  if (!borrower || borrower.status === 'bloqueado') throw invalid;
+  const candidates = await PortalChallenge.find({ orgId: req.org._id, borrowerId: borrower._id, verifiedAt: null, expiresAt: { $gt: new Date() }, attempts: { $lt: 5 } })
+    .sort({ createdAt: -1 }).limit(5);
+  const match = candidates.find((c) => sameCode(c, code));
+  if (!match) {
+    if (candidates[0]) { candidates[0].attempts += 1; await candidates[0].save(); }
+    throw invalid;
+  }
+  match.verifiedAt = new Date();
+  await match.save();
+  const token = jwt.sign({ sub: String(borrower._id), org: String(req.org._id) }, env.JWT_ACCESS_SECRET, { audience: 'portal', expiresIn: SESSION });
+  req.borrowerId = borrower._id;
   await logAccess(req, 'portal.login');
   res.json({ token, expiresInMinutes: 30 });
 });

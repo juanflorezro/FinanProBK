@@ -6,7 +6,7 @@ const schema = new mongoose.Schema({
   orgId: ref('Organization', { required: true }),
   borrowerId: ref('Borrower'),             // null si el documento no existe (respuesta igual, sin revelar nada)
   codeHash: String,
-  channel: enumOf(['email', 'sms', 'none'], { default: 'none' }),
+  channel: enumOf(['email', 'sms', 'manual', 'none'], { default: 'none' }), // manual = lo generó la empresa
   attempts: { type: Number, default: 0 },
   ip: String,
   expiresAt: { type: Date, required: true },

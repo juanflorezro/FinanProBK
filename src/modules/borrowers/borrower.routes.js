@@ -9,6 +9,8 @@ import { nextSeq } from '../counters/counter.model.js';
 import { Borrower } from './borrower.model.js';
 import { Loan } from '../loans/loan.model.js';
 import { borrowerQuery, buildBorrowerFilter } from '../../utils/listFilters.js';
+import { newPortalChallenge } from '../portal/portal.codes.js';
+import { audit } from '../audit/audit.service.js';
 import { assertPlanLimit } from '../../utils/planLimits.js';
 
 const router = Router();
@@ -68,6 +70,18 @@ router.patch('/:id', can('borrower.update'), validate({ params: z.object({ id: o
   borrower.set(req.valid.body);
   await borrower.save();
   res.json(borrower);
+});
+
+/** Código de acceso al portal para que la empresa se lo comparta al deudor (WhatsApp, en persona). Dura 60 minutos. */
+router.post('/:id/portal-code', can('borrower.read'), validate({ params: z.object({ id: objectId }) }), async (req, res) => {
+  const borrower = await Borrower.findById(req.valid.params.id);
+  if (!borrower) throw httpError(404, 'BORROWER_NOT_FOUND', 'Deudor no encontrado');
+  if (borrower.status === 'bloqueado') throw httpError(409, 'BORROWER_BLOCKED', 'El deudor está bloqueado');
+  if (req.org.settings?.portalEnabled === false) throw httpError(409, 'PORTAL_DISABLED', 'El portal está desactivado en Configuración');
+  const { challenge, code } = newPortalChallenge({ orgId: req.org._id, borrowerId: borrower._id, channel: 'manual', minutes: 60, ip: req.ip });
+  await challenge.save();
+  await audit(req, { action: 'portal.code_generated', entity: 'Borrower', entityId: borrower._id, orgId: req.org._id });
+  res.status(201).json({ code, expiresAt: challenge.expiresAt, docType: borrower.docType });
 });
 
 export default router;
