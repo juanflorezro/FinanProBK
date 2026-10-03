@@ -53,7 +53,8 @@ router.get('/', can('payment.read'), validate({
   const filter = Object.fromEntries(Object.entries(rest).filter(([, v]) => v));
   if (from || to) filter.paidAt = { ...(from && { $gte: from }), ...(to && { $lte: to }) };
   const [items, total] = await Promise.all([
-    Payment.find(filter).sort({ paidAt: -1 }).skip((page - 1) * limit).limit(limit),
+    Payment.find(filter).sort({ paidAt: -1 }).skip((page - 1) * limit).limit(limit)
+      .populate('loanId', 'loanNumber').populate('borrowerId', 'firstName lastName docNumber'),
     Payment.countDocuments(filter),
   ]);
   res.json({ items, total, page, limit });

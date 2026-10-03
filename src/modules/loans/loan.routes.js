@@ -12,6 +12,9 @@ import { Payment } from '../payments/payment.model.js';
 import { disburseLoan, refreshLoan, getInstallments } from './loan.service.js';
 import { assertPlanLimit } from '../../utils/planLimits.js';
 import { checkRateCompliance } from './rateCompliance.js';
+import { buildSchedule } from './schedule.js';
+import { deriveRates } from '../../utils/rates.js';
+import { addPeriods } from '../../utils/dates.js';
 
 const router = Router();
 const idParam = { params: z.object({ id: objectId }) };
@@ -36,6 +39,40 @@ const createBody = z.object({
   acknowledgeRateCap: z.boolean().optional(), // confirma tasa sobre el tope (política 'advertir')
 }).refine((b) => b.amortization === 'abonos_libres' || b.termCount, {
   path: ['termCount'], message: 'Indica el número de cuotas',
+});
+
+/** Calcula el plan de cuotas y revisa la tasa sin guardar nada. Para la vista previa del formulario. */
+router.post('/simulate', can('loan.create'), validate({
+  body: z.object({
+    principal: cents,
+    rate: rateValue,
+    rateBasis: z.enum(RATE_BASES).default('mensual'),
+    rateKind: z.enum(['nominal', 'efectiva']).default('efectiva'),
+    interestBase: z.enum(['saldo_capital', 'capital_inicial']).default('saldo_capital'),
+    amortization: z.enum(AMORTIZATION).default('frances'),
+    frequency: z.enum(FREQUENCIES).default('mensual'),
+    termCount: z.number().int().min(1).max(600).optional(),
+    firstDueDate: z.coerce.date().optional(),
+  }).refine((b) => b.amortization === 'abonos_libres' || b.termCount, { path: ['termCount'], message: 'Indica el número de cuotas' }),
+}), async (req, res) => {
+  const b = req.valid.body;
+  const rates = deriveRates(b);
+  const schedule = buildSchedule({
+    ...b,
+    ratePerPeriod: rates.ratePerPeriod,
+    firstDueDate: b.firstDueDate ?? addPeriods(new Date(), b.frequency, 1),
+  });
+  let compliance;
+  try {
+    compliance = { ...(await checkRateCompliance({ org: req.org, loan: b, acknowledge: true })), ok: true };
+  } catch (err) {
+    compliance = { ok: false, code: err.code, message: err.message, details: err.details };
+  }
+  if (compliance.rateCapCheck === 'excede_confirmado') {
+    compliance = { ok: false, code: 'RATE_CAP_ACK_REQUIRED', policy: 'advertir', message: 'La tasa supera el máximo legal. Tendrás que confirmar el aviso al crear el préstamo.', maxAnnual: compliance.rateCapEA };
+  }
+  const totals = schedule.reduce((a, r) => ({ principal: a.principal + r.principalDue, interest: a.interest + r.interestDue }), { principal: 0, interest: 0 });
+  res.json({ rates, schedule, totals: { ...totals, total: totals.principal + totals.interest }, compliance });
 });
 
 router.post('/', can('loan.create'), validate({ body: createBody }), async (req, res) => {

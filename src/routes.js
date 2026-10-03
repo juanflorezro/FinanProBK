@@ -11,6 +11,8 @@ import cashRoutes from './modules/cash/cash.routes.js';
 import loanRoutes from './modules/loans/loan.routes.js';
 import paymentRoutes from './modules/payments/payment.routes.js';
 import memberRoutes from './modules/users/members.routes.js';
+import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
+import settingsRoutes from './modules/settings/settings.routes.js';
 import adminAuthRoutes from './modules/platform/adminAuth.routes.js';
 import adminRoutes from './modules/platform/admin.routes.js';
 
@@ -37,5 +39,8 @@ api.use('/cash-accounts', ...orgScope, cashRoutes);
 api.use('/loans', ...orgScope, loanRoutes);
 api.use('/payments', ...orgScope, paymentRoutes);
 api.use('/members', ...orgScope, memberRoutes);
+api.use('/dashboard', ...orgScope, dashboardRoutes);
+// Configuración: se puede ver aunque la org esté en solo lectura
+api.use('/settings', authenticate, loadOrg, tenantContext, settingsRoutes);
 
 export default api;
