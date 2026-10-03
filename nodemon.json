@@ -1,0 +1,1 @@
+{"watch":["src"],"ext":"js,json","ignore":["tests/*","node_modules/*"],"exec":"node --env-file=.env src/server.js","delay":500}
