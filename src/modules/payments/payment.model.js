@@ -48,7 +48,8 @@ paymentSchema.path('amount').validate(function (v) {
 }, 'Un pago debe ser positivo y un reverso negativo');
 
 // Inmutable: después de creado solo puede marcarse como reversado.
-const EDITABLE_AFTER_CREATE = ['status', 'reversedById', 'reversalReason', 'receiptPdfKey', 'updatedBy', 'updatedAt', '__v'];
+// Campos que no cambian saldos: soporte los puede corregir. Monto y aplicación nunca (para eso se reversa).
+const EDITABLE_AFTER_CREATE = ['status', 'reversedById', 'reversalReason', 'receiptPdfKey', 'updatedBy', 'updatedAt', '__v', 'method', 'externalReference', 'cashAccountId'];
 paymentSchema.pre('save', function () {
   if (this.isNew) return;
   const forbidden = this.modifiedPaths().filter((p) => !EDITABLE_AFTER_CREATE.includes(p));

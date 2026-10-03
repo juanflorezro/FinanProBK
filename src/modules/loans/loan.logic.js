@@ -21,7 +21,10 @@ export function accrueLateInterest(loan, installments, asOf) {
     if (asOf <= graceEnd) continue;
     const from = inst.lateAccruedUntil ?? inst.dueDate;
     const days = daysBetween(from, asOf);
-    const base = (inst.principalDue - inst.principalPaid) + (inst.interestDue - inst.interestPaid);
+    // Por defecto la mora se cobra solo sobre el capital vencido (cobrar interés sobre interés,
+    // anatocismo, está restringido por ley en Colombia). Se puede cambiar por préstamo.
+    const base = (inst.principalDue - inst.principalPaid)
+      + (loan.lateInterestBase === 'capital_e_interes' ? inst.interestDue - inst.interestPaid : 0);
     const amount = lateInterestFor({ overdueBase: base, dailyRate: daily, days });
     if (amount > 0) inst.lateInterestAccrued += amount;
     inst.lateAccruedUntil = startOfDay(asOf);

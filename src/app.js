@@ -14,6 +14,8 @@ export function createApp() {
   const app = express();
   app.set('trust proxy', 1); // detrás de Render/Railway/Nginx para leer la IP real
   app.disable('x-powered-by');
+  app.set('etag', false); // sin ETag: el navegador no recibe 304 vacíos
+  app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
   app.use(pinoHttp({
     genReqId: (req) => req.headers['x-request-id'] ?? randomUUID(),

@@ -12,6 +12,7 @@ import { Payment } from '../payments/payment.model.js';
 import { disburseLoan, refreshLoan, getInstallments } from './loan.service.js';
 import { assertPlanLimit } from '../../utils/planLimits.js';
 import { checkRateCompliance } from './rateCompliance.js';
+import { loanQuery, buildLoanFilter } from '../../utils/listFilters.js';
 import { buildSchedule } from './schedule.js';
 import { deriveRates } from '../../utils/rates.js';
 import { addPeriods } from '../../utils/dates.js';
@@ -31,6 +32,7 @@ const createBody = z.object({
   interestBase: z.enum(['saldo_capital', 'capital_inicial']).default('saldo_capital'),
   lateRate: rateValue.default('0'),
   lateRateBasis: z.enum(RATE_BASES).default('mensual'),
+  lateInterestBase: z.enum(['capital', 'capital_e_interes']).default('capital'),
   amortization: z.enum(AMORTIZATION).default('frances'),
   frequency: z.enum(FREQUENCIES).default('mensual'),
   termCount: z.number().int().min(1).max(600).optional(),
@@ -100,23 +102,11 @@ router.post('/', can('loan.create'), validate({ body: createBody }), async (req,
   res.status(201).json(loan);
 });
 
-router.get('/', can('loan.read'), validate({
-  query: pagination.extend({
-    status: z.enum(LOAN_STATUS).optional(),
-    borrowerId: objectId.optional(),
-    collectorId: objectId.optional(),
-    overdue: z.enum(['true', 'false']).optional(),
-  }),
-}), async (req, res) => {
-  const { page, limit, status, borrowerId, collectorId, overdue } = req.valid.query;
-  const filter = {};
-  if (status) filter.status = status;
-  if (borrowerId) filter.borrowerId = borrowerId;
-  if (collectorId) filter.collectorId = collectorId;
-  if (overdue === 'true') filter.daysPastDue = { $gt: 0 };
-
+router.get('/', can('loan.read'), validate({ query: pagination.merge(loanQuery) }), async (req, res) => {
+  const { page, limit, ...f } = req.valid.query;
+  const { filter, sort } = await buildLoanFilter(f);
   const [items, total] = await Promise.all([
-    Loan.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit)
+    Loan.find(filter).sort(sort).skip((page - 1) * limit).limit(limit)
       .populate('borrowerId', 'code firstName lastName docType docNumber phone'),
     Loan.countDocuments(filter),
   ]);

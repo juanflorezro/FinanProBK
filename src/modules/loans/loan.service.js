@@ -10,8 +10,9 @@ import { httpError } from '../../utils/errors.js';
 
 export { httpError };
 
-export function getInstallments(loan, session) {
+export function getInstallments(loan, session, { withDeleted = false } = {}) {
   return Installment.find({ loanId: loan._id, status: { $ne: 'anulada' } })
+    .setOptions({ withDeleted })
     .sort({ number: 1 })
     .session(session);
 }

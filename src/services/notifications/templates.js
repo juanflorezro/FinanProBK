@@ -49,3 +49,30 @@ export function welcomeOwnerEmail({ companyName, url, trialDays }) {
 <p style="margin:24px 0"><a href="${esc(url)}" style="background:#2f6b4f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Crear mi organización</a></p>`),
   };
 }
+
+const SUPPORT_EVENT = {
+  nueva: (o) => `Nueva solicitud de ${o}`,
+  mensaje: (o) => `Nuevo mensaje de ${o}`,
+  asignada: () => 'Te asignaron una solicitud',
+};
+
+export function supportAdminEmail({ event, orgName, ticket, preview, url }) {
+  const title = SUPPORT_EVENT[event](orgName ?? 'un cliente');
+  return {
+    subject: `[Soporte #${ticket.number}] ${title}: ${ticket.subject}`,
+    text: `${title}\n#${ticket.number} ${ticket.subject} (${ticket.type}, prioridad ${ticket.priority})\n\n"${preview}"\n\nResponder: ${url}`,
+    html: layout(title, `<p><strong>#${ticket.number} ${esc(ticket.subject)}</strong><br><span style="color:#56675f">${esc(ticket.type)}, prioridad ${esc(ticket.priority)}</span></p>
+<p style="padding:12px 14px;background:#f3f6f4;border-left:3px solid #c9a55a;border-radius:4px">${esc(preview)}</p>
+<p style="margin:24px 0"><a href="${esc(url)}" style="background:#2f6b4f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Abrir en el panel</a></p>`),
+  };
+}
+
+export function supportUserEmail({ ticket, preview, url }) {
+  return {
+    subject: `Soporte FinanPro respondió tu solicitud #${ticket.number}`,
+    text: `Tienes una respuesta en "${ticket.subject}":\n\n"${preview}"\n\nVer: ${url}`,
+    html: layout('Tienes una respuesta de soporte', `<p>Sobre <strong>${esc(ticket.subject)}</strong>:</p>
+<p style="padding:12px 14px;background:#f3f6f4;border-left:3px solid #2f6b4f;border-radius:4px">${esc(preview)}</p>
+<p style="margin:24px 0"><a href="${esc(url)}" style="background:#2f6b4f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Ver la conversación</a></p>`),
+  };
+}

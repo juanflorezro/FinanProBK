@@ -1,7 +1,9 @@
 import Decimal from 'decimal.js';
 
 // Cuántos períodos tiene un año según la periodicidad.
-export const PERIODS_PER_YEAR = { diaria: 365, semanal: 52, quincenal: 24, mensual: 12, anual: 1 };
+// Semanal usa 365/7 (52,14) para que la conversión coincida con cuotas cada 7 días.
+// Quincenal son 24 porque las fechas van por medio mes (ver utils/dates.js).
+export const PERIODS_PER_YEAR = { diaria: 365, semanal: 365 / 7, quincenal: 24, mensual: 12, anual: 1 };
 export const RATE_BASES = Object.keys(PERIODS_PER_YEAR);
 export const FREQUENCIES = ['diaria', 'semanal', 'quincenal', 'mensual'];
 

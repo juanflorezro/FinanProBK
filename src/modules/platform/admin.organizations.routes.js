@@ -16,6 +16,12 @@ import { Loan, LOAN_STATUS } from '../loans/loan.model.js';
 import { Payment } from '../payments/payment.model.js';
 import { PaymentAllocation } from '../payments/paymentAllocation.model.js';
 import { getInstallments, refreshLoan } from '../loans/loan.service.js';
+import { Installment } from '../loans/installment.model.js';
+import { CashAccount } from '../cash/cashAccount.model.js';
+import { withTransaction } from '../../db/withTransaction.js';
+import { Ticket } from '../support/ticket.model.js';
+import { addSystemMessage } from '../support/support.service.js';
+import supportEditRoutes from './admin.supportEdit.routes.js';
 
 const router = Router();
 const idParam = z.object({ id: objectId });
@@ -161,24 +167,34 @@ support.get('/borrowers', requireSupport(), validate({ query: pagination.extend(
   res.json({ items, total, page, limit });
 });
 
-support.get('/loans', requireSupport(), validate({ query: pagination.extend({ status: z.enum(LOAN_STATUS).optional(), borrowerId: objectId.optional() }) }), async (req, res) => {
-  const { page, limit, ...rest } = req.valid.query;
+support.get('/loans', requireSupport(), validate({ query: pagination.extend({
+  status: z.enum(LOAN_STATUS).optional(), borrowerId: objectId.optional(), q: z.string().trim().max(40).optional(),
+  deleted: z.enum(['solo', 'incluir']).optional(),
+}) }), async (req, res) => {
+  const { page, limit, deleted, q, ...rest } = req.valid.query;
   const filter = Object.fromEntries(Object.entries(rest).filter(([, v]) => v));
+  if (deleted === 'solo') filter.deletedAt = { $ne: null };
+  if (q) filter.loanNumber = new RegExp(escapeRx(q), 'i');
+  const opts = { withDeleted: Boolean(deleted) };
   const [items, total] = await Promise.all([
-    Loan.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).populate('borrowerId', 'code firstName lastName docNumber'),
-    Loan.countDocuments(filter),
+    Loan.find(filter).setOptions(opts).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit)
+      .populate({ path: 'borrowerId', select: 'code firstName lastName docNumber', options: { withDeleted: true } }),
+    Loan.countDocuments(filter).setOptions(opts),
   ]);
   res.json({ items, total, page, limit });
 });
 
 support.get('/loans/:loanId', requireSupport(), validate({ params: z.object({ id: objectId, loanId: objectId }) }), async (req, res) => {
-  const loan = await Loan.findById(req.valid.params.loanId).populate('borrowerId', 'code firstName lastName docType docNumber phone');
+  const loan = await Loan.findById(req.valid.params.loanId).setOptions({ withDeleted: true })
+    .populate({ path: 'borrowerId', select: 'code firstName lastName docType docNumber phone', options: { withDeleted: true } })
+    .populate('deletedByAdminId', 'name');
   if (!loan) throw httpError(404, 'LOAN_NOT_FOUND', 'Préstamo no encontrado');
+  const withDeleted = Boolean(loan.deletedAt);
   const [installments, payments] = await Promise.all([
-    getInstallments(loan),
-    Payment.find({ loanId: loan._id }).sort({ paidAt: -1 }),
+    getInstallments(loan, undefined, { withDeleted }),
+    Payment.find({ loanId: loan._id }).setOptions({ withDeleted }).sort({ paidAt: -1 }),
   ]);
-  const allocations = await PaymentAllocation.find({ paymentId: { $in: payments.map((p) => p._id) } }).sort({ order: 1 });
+  const allocations = await PaymentAllocation.find({ paymentId: { $in: payments.map((p) => p._id) } }).setOptions({ withDeleted }).sort({ order: 1 });
   await audit(req, { action: 'support.view_loan', entity: 'Loan', entityId: loan._id, orgId: loan.orgId, supportGrantId: req.supportGrant._id });
   res.json({ loan, installments, payments, allocations });
 });
@@ -188,6 +204,82 @@ support.post('/loans/:loanId/refresh', requireSupport('escritura'), validate({ p
   await audit(req, { action: 'support.refresh_loan', entity: 'Loan', entityId: req.valid.params.loanId, orgId: req.supportGrant.orgId, supportGrantId: req.supportGrant._id });
   res.json(loan);
 });
+
+support.get('/payments', requireSupport(), validate({ query: pagination }), async (req, res) => {
+  const { page, limit } = req.valid.query;
+  const [items, total] = await Promise.all([
+    Payment.find({}).sort({ paidAt: -1 }).skip((page - 1) * limit).limit(limit)
+      .populate('loanId', 'loanNumber').populate('borrowerId', 'firstName lastName'),
+    Payment.countDocuments({}),
+  ]);
+  res.json({ items, total, page, limit });
+});
+
+support.get('/cash-accounts', requireSupport(), async (_req, res) => {
+  res.json(await CashAccount.find({}).sort({ name: 1 }));
+});
+
+/**
+ * Elimina un préstamo para el cliente (borrado lógico): deja de verse en su app,
+ * tableros y reportes, pero el administrador conserva el historial completo.
+ */
+support.post('/loans/:loanId/delete', requireSupport('escritura'), validate({
+  params: z.object({ id: objectId, loanId: objectId }),
+  body: z.object({ reason: z.string().trim().min(10).max(500), ticketId: objectId.optional() }),
+}), async (req, res) => {
+  const { loanId } = req.valid.params;
+  const { reason, ticketId } = req.valid.body;
+  const now = new Date();
+  const loan = await withTransaction(async (session) => {
+    const l = await Loan.findById(loanId).session(session);
+    if (!l) throw httpError(404, 'LOAN_NOT_FOUND', 'Préstamo no encontrado o ya eliminado');
+    const tag = { $set: { deletedAt: now } };
+    await Installment.updateMany({ loanId }, tag, { session });
+    await Payment.updateMany({ loanId }, tag, { session });
+    await PaymentAllocation.updateMany({ loanId }, tag, { session });
+    l.deletedAt = now;
+    l.deletedReason = reason;
+    l.deletedByAdminId = req.admin._id;
+    if (ticketId) l.deletedTicketId = ticketId;
+    await l.save({ session });
+    return l;
+  });
+  if (ticketId) {
+    const ticket = await Ticket.findOne({ _id: ticketId, orgId: req.supportGrant.orgId });
+    if (ticket) {
+      await addSystemMessage(ticket, `El crédito ${loan.loanNumber} fue eliminado por soporte. Motivo: ${reason}`);
+      await ticket.save();
+    }
+  }
+  await audit(req, { action: 'support.delete_loan', entity: 'Loan', entityId: loan._id, orgId: loan.orgId, supportGrantId: req.supportGrant._id, after: { loanNumber: loan.loanNumber, reason, ticketId } });
+  res.json({ ok: true, loanNumber: loan.loanNumber });
+});
+
+support.post('/loans/:loanId/restore', requireSupport('escritura'), validate({
+  params: z.object({ id: objectId, loanId: objectId }),
+  body: z.object({ reason: z.string().trim().min(5).max(500) }),
+}), async (req, res) => {
+  const { loanId } = req.valid.params;
+  const opts = { withDeleted: true };
+  const loan = await withTransaction(async (session) => {
+    const l = await Loan.findById(loanId).setOptions(opts).session(session);
+    if (!l?.deletedAt) throw httpError(409, 'LOAN_NOT_DELETED', 'El préstamo no está eliminado');
+    const tag = { $set: { deletedAt: null } };
+    await Installment.updateMany({ loanId }, tag, { session }).setOptions(opts);
+    await Payment.updateMany({ loanId }, tag, { session }).setOptions(opts);
+    await PaymentAllocation.updateMany({ loanId }, tag, { session }).setOptions(opts);
+    l.deletedAt = null;
+    l.deletedReason = undefined;
+    l.deletedByAdminId = undefined;
+    await l.save({ session });
+    return l;
+  });
+  await audit(req, { action: 'support.restore_loan', entity: 'Loan', entityId: loan._id, orgId: loan.orgId, supportGrantId: req.supportGrant._id, after: { reason: req.valid.body.reason } });
+  res.json({ ok: true });
+});
+
+// Correcciones (editar registros): exigen acceso de soporte con permiso de escritura
+support.use(requireSupport('escritura'), supportEditRoutes);
 
 router.use('/:id/support', adminRole('soporte'), support);
 

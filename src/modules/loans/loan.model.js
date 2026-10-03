@@ -31,6 +31,7 @@ const loanSchema = createSchema({
   rateSource: enumOf(['producto', 'manual'], { default: 'manual' }),
   lateRate: rate({ default: '0' }),
   lateRateBasis: enumOf(RATE_BASES, { default: 'mensual' }),
+  lateInterestBase: enumOf(['capital', 'capital_e_interes'], { default: 'capital' }), // sobre qué se cobra la mora
   // Calculadas en pre('validate'), solo informativas / para el plan de cuotas
   ratePerPeriod: rate(),
   rateMonthly: rate(),
@@ -73,6 +74,10 @@ const loanSchema = createSchema({
   lastPaymentAt: Date,
 
   notes: String,
+  // Eliminado por soporte: el cliente ya no lo ve, el administrador sí (historial)
+  deletedReason: String,
+  deletedByAdminId: ref('PlatformAdmin'),
+  deletedTicketId: ref('Ticket'),
 });
 
 loanSchema.index({ orgId: 1, loanNumber: 1 }, { unique: true });

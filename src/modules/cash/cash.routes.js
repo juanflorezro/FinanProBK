@@ -7,8 +7,10 @@ import { CashAccount } from './cashAccount.model.js';
 
 const router = Router();
 
-router.get('/', can('cash.read'), async (_req, res) => {
-  res.json(await CashAccount.find({ isActive: true }).sort({ name: 1 }));
+// Por defecto solo activas (para los formularios de pago); ?todas=1 incluye inactivas
+router.get('/', can('cash.read'), async (req, res) => {
+  const filter = req.query.todas === '1' ? {} : { isActive: true };
+  res.json(await CashAccount.find(filter).sort({ isActive: -1, name: 1 }));
 });
 
 router.post('/', can('cash.create'), validate({

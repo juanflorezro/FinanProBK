@@ -8,6 +8,7 @@ import { CashAccount } from '../cash/cashAccount.model.js';
 import { Payment, PAYMENT_METHODS } from './payment.model.js';
 import { PaymentAllocation } from './paymentAllocation.model.js';
 import { registerPayment, reversePayment } from './payment.service.js';
+import { paymentQuery, buildPaymentFilter } from '../../utils/listFilters.js';
 
 const router = Router();
 
@@ -40,24 +41,16 @@ router.post('/', can('payment.create'), validate({ body: createBody }), async (r
   res.status(201).json(payment);
 });
 
-router.get('/', can('payment.read'), validate({
-  query: pagination.extend({
-    loanId: objectId.optional(),
-    borrowerId: objectId.optional(),
-    cashAccountId: objectId.optional(),
-    from: z.coerce.date().optional(),
-    to: z.coerce.date().optional(),
-  }),
-}), async (req, res) => {
-  const { page, limit, from, to, ...rest } = req.valid.query;
-  const filter = Object.fromEntries(Object.entries(rest).filter(([, v]) => v));
-  if (from || to) filter.paidAt = { ...(from && { $gte: from }), ...(to && { $lte: to }) };
-  const [items, total] = await Promise.all([
-    Payment.find(filter).sort({ paidAt: -1 }).skip((page - 1) * limit).limit(limit)
-      .populate('loanId', 'loanNumber').populate('borrowerId', 'firstName lastName docNumber'),
+router.get('/', can('payment.read'), validate({ query: pagination.merge(paymentQuery) }), async (req, res) => {
+  const { page, limit, ...f } = req.valid.query;
+  const { filter, sort } = await buildPaymentFilter(f);
+  const [items, total, sums] = await Promise.all([
+    Payment.find(filter).sort(sort).skip((page - 1) * limit).limit(limit)
+      .populate('loanId', 'loanNumber').populate('borrowerId', 'firstName lastName docNumber').populate('cashAccountId', 'name'),
     Payment.countDocuments(filter),
+    Payment.aggregate([{ $match: filter }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
   ]);
-  res.json({ items, total, page, limit });
+  res.json({ items, total, page, limit, sumAmount: sums[0]?.total ?? 0 });
 });
 
 router.get('/:id', can('payment.read'), validate({ params: z.object({ id: objectId }) }), async (req, res) => {

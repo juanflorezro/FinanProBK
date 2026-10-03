@@ -7,6 +7,7 @@ import organizationRoutes from './admin.organizations.routes.js';
 import auditRoutes from './admin.audit.routes.js';
 import adminRoutes from './admin.admins.routes.js';
 import rateCapRoutes from './admin.rateCaps.routes.js';
+import supportRoutes from './admin.support.routes.js';
 
 // Todo bajo /api/admin requiere sesión de administrador de plataforma.
 const router = Router();
@@ -17,6 +18,7 @@ router.use('/plans', planRoutes);
 router.use('/tenants', adminRole('finanzas', 'soporte'), tenantRoutes);
 router.use('/organizations', adminRole('soporte', 'finanzas'), organizationRoutes);
 router.use('/rate-caps', rateCapRoutes);
+router.use('/support', adminRole('soporte'), supportRoutes);
 router.use('/audit', adminRole('soporte'), auditRoutes);
 router.use('/admins', adminRole(), adminRoutes);
 

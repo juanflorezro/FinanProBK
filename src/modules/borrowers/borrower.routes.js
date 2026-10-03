@@ -8,6 +8,7 @@ import { objectId, pagination } from '../../utils/schemas.js';
 import { nextSeq } from '../counters/counter.model.js';
 import { Borrower } from './borrower.model.js';
 import { Loan } from '../loans/loan.model.js';
+import { borrowerQuery, buildBorrowerFilter } from '../../utils/listFilters.js';
 import { assertPlanLimit } from '../../utils/planLimits.js';
 
 const router = Router();
@@ -42,16 +43,11 @@ router.post('/', can('borrower.create'), validate({ body: z.object(fields) }), a
   res.status(201).json(borrower);
 });
 
-router.get('/', can('borrower.read'), validate({ query: pagination.extend({ q: z.string().trim().max(60).optional(), status: z.string().optional() }) }), async (req, res) => {
-  const { q, status, page, limit } = req.valid.query;
-  const filter = {};
-  if (status) filter.status = status;
-  if (q) {
-    const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    filter.$or = [{ docNumber: { $regex: rx } }, { firstName: { $regex: rx } }, { lastName: { $regex: rx } }, { code: { $regex: rx } }];
-  }
+router.get('/', can('borrower.read'), validate({ query: pagination.merge(borrowerQuery) }), async (req, res) => {
+  const { page, limit, ...f } = req.valid.query;
+  const { filter, sort } = await buildBorrowerFilter(f);
   const [items, total] = await Promise.all([
-    Borrower.find(filter).sort({ lastName: 1, firstName: 1 }).skip((page - 1) * limit).limit(limit),
+    Borrower.find(filter).sort(sort).skip((page - 1) * limit).limit(limit),
     Borrower.countDocuments(filter),
   ]);
   res.json({ items, total, page, limit });

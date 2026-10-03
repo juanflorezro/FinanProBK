@@ -13,6 +13,9 @@ import paymentRoutes from './modules/payments/payment.routes.js';
 import memberRoutes from './modules/users/members.routes.js';
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
 import settingsRoutes from './modules/settings/settings.routes.js';
+import supportRoutes from './modules/support/support.routes.js';
+import exportRoutes from './modules/exports/export.routes.js';
+import portalRoutes from './modules/portal/portal.routes.js';
 import adminAuthRoutes from './modules/platform/adminAuth.routes.js';
 import adminRoutes from './modules/platform/admin.routes.js';
 
@@ -24,6 +27,9 @@ api.get('/health', (_req, res) => {
 
 // Públicas (con límite de intentos)
 api.use('/auth', authRoutes);
+
+// Portal público del deudor: /api/portal/:slug/...
+api.use('/portal/:slug', portalRoutes);
 
 // Panel de administrador de la plataforma
 api.use('/admin/auth', adminAuthRoutes);
@@ -42,5 +48,8 @@ api.use('/members', ...orgScope, memberRoutes);
 api.use('/dashboard', ...orgScope, dashboardRoutes);
 // Configuración: se puede ver aunque la org esté en solo lectura
 api.use('/settings', authenticate, loadOrg, tenantContext, settingsRoutes);
+// Soporte y exportaciones: disponibles aunque la org esté en solo lectura o suspendida
+api.use('/support', authenticate, loadOrg, tenantContext, supportRoutes);
+api.use('/exports', authenticate, loadOrg, tenantContext, exportRoutes);
 
 export default api;

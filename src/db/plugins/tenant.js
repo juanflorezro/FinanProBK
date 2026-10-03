@@ -42,16 +42,23 @@ export function tenantPlugin(schema) {
     const pipeline = this.pipeline();
     const first = pipeline[0] && Object.keys(pipeline[0])[0];
     const idx = FIRST_STAGES.includes(first) ? 1 : 0;
-    pipeline.splice(idx, 0, { $match: { orgId } });
+    // También excluye lo eliminado (borrado lógico), salvo .option({ withDeleted: true })
+    pipeline.splice(idx, 0, { $match: this.options?.withDeleted ? { orgId } : { orgId, deletedAt: null } });
   });
 
-  schema.pre('save', async function () {
+  // Va en 'validate' (no en 'save'): Mongoose valida ANTES de los hooks de save,
+  // así que si asignamos orgId en save, la validación ya falló con "orgId is required".
+  schema.pre('validate', async function () {
     const orgId = currentOrgId();
     if (this.isNew && !this.orgId) {
       if (!orgId) throw new TenantError(`Creando ${this.constructor.modelName} sin orgId`);
       this.orgId = orgId;
     }
-    if (orgId && !this.orgId.equals(orgId)) {
+  });
+
+  schema.pre('save', async function () {
+    const orgId = currentOrgId();
+    if (orgId && this.orgId && !this.orgId.equals(orgId)) {
       throw new TenantError('El documento pertenece a otra organización');
     }
   });
