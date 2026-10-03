@@ -11,6 +11,7 @@ const PURPOSE = {
   verify_email: { subject: 'Tu código para crear la cuenta', title: 'Confirma tu correo' },
   reset_password: { subject: 'Tu código para cambiar la contraseña', title: 'Cambia tu contraseña' },
   login_2fa: { subject: 'Tu código para iniciar sesión', title: 'Confirma que eres tú' },
+  admin_login: { subject: 'Código de acceso al panel de FinanPro', title: 'Acceso al panel de administración' },
 };
 
 export function verificationCodeEmail({ code, purpose, minutes }) {

@@ -30,3 +30,13 @@ describe('aislamiento por organización', () => {
     await expect(new CashAccount({ name: 'X' }).validate()).rejects.toMatchObject({ code: 'TENANT_CONTEXT_MISSING' });
   });
 });
+
+describe('runWithContext con consultas', () => {
+  it('ejecuta la consulta dentro del contexto aunque se devuelva sin await', async () => {
+    mongoose.set('bufferCommands', false); // sin base de datos: falla al conectar, no por falta de orgId
+    const orgId = new mongoose.Types.ObjectId();
+    const err = await runWithContext({ orgId }, () => Borrower.findOne({ docNumberHash: 'x' })).catch((e) => e);
+    expect(err?.code).not.toBe('TENANT_CONTEXT_MISSING');
+    mongoose.set('bufferCommands', true);
+  });
+});

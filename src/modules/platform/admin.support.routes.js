@@ -63,7 +63,7 @@ router.get('/tickets/:id', validate({ params: z.object({ id: objectId }) }), asy
     { path: 'assignedAdminId', select: 'name email' },
   ]);
   const relatedLoan = ticket.relatedLoanId
-    ? await runWithContext({ orgId: ticket.orgId._id }, () => Loan.findById(ticket.relatedLoanId).setOptions({ withDeleted: true }).select('loanNumber status deletedAt deletedReason'))
+    ? await runWithContext({ orgId: ticket.orgId._id }, () => Loan.findById(ticket.relatedLoanId).setOptions({ withDeleted: true }).select('loanNumber status deletedAt deletedReason').exec())
     : null;
   const [messages, admins] = await Promise.all([
     TicketMessage.find({ ticketId: ticket._id }).sort({ createdAt: 1 }).limit(1000),

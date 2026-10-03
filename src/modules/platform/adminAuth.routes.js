@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { isProd, env } from '../../config/env.js';
 import { validate } from '../../middlewares/validate.js';
 import { authenticateAdmin } from '../../middlewares/adminAuth.js';
-import { adminLogin, adminLoginVerify, adminRefresh, adminLogout } from './adminAuth.service.js';
+import { adminLogin, adminLoginVerify, adminRefresh, adminLogout, adminSendEmailCode } from './adminAuth.service.js';
 
 const router = Router();
 const limiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
@@ -29,9 +29,15 @@ router.post('/login', limiter, validate({
 });
 
 router.post('/login/verify', limiter, validate({
-  body: z.object({ mfaToken: z.string().min(20), code: z.string().trim().regex(/^\d{6}$/) }),
+  body: z.object({ mfaToken: z.string().min(20), code: z.string().trim().regex(/^\d{6}$/), method: z.enum(['totp', 'email']).default('totp') }),
 }), async (req, res) => {
   send(res, await adminLoginVerify(req.valid.body, meta(req)));
+});
+
+const codeLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false });
+
+router.post('/login/email-code', codeLimiter, validate({ body: z.object({ mfaToken: z.string().min(20) }) }), async (req, res) => {
+  res.json(await adminSendEmailCode(req.valid.body.mfaToken));
 });
 
 router.post('/refresh', limiter, async (req, res) => {

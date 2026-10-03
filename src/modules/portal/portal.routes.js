@@ -73,7 +73,7 @@ router.post('/request-code', codeLimiter, validate({
 }), async (req, res) => {
   const { docType, docNumber } = req.valid.body;
   const hash = documentHash(req.org._id, docType, docNumber);
-  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: hash }).select('email phone firstName status'));
+  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: hash }).select('email phone firstName status').exec()); // .exec() dentro del contexto
 
   const challenge = new PortalChallenge({ orgId: req.org._id, ip: req.ip, expiresAt: new Date(Date.now() + CODE_MIN * 60_000) });
   let hint = null;
