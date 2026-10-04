@@ -2,6 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { OAuth2Client } from 'google-auth-library';
 import { env } from '../../config/env.js';
 import { validate } from '../../middlewares/validate.js';
 import { httpError } from '../../utils/errors.js';
@@ -19,8 +20,8 @@ import { PortalChallenge } from './portalChallenge.model.js';
 import { newPortalChallenge, sameCode } from './portal.codes.js';
 
 /**
- * Portal del deudor (cliente de la empresa): consulta de sus préstamos con documento + código por correo
- * (o un código que le genera la empresa desde su ficha).
+ * Portal del deudor (cliente de la empresa). Se entra SIEMPRE con el correo registrado en su ficha:
+ * con Google (mismo correo) o con documento + código enviado a ese correo.
  * Público, solo lectura y aislado por organización (/api/portal/:slug/...).
  */
 const router = Router({ mergeParams: true });
@@ -62,28 +63,7 @@ router.use(loadOrg);
 
 // ---------------------------------------------------------------- Datos públicos de la empresa
 router.get('/', (req, res) => {
-  res.json({ name: req.org.name, logoUrl: req.org.logoUrl || null, country: req.org.country, currency: req.org.currency, access: req.org.settings?.portalAccess ?? 'documento' });
-});
-
-// ---------------------------------------------------------------- Acceso simple: solo documento
-// Activo cuando la empresa elige "Solo con documento" en Configuración → Portal.
-const docLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'TOO_MANY', message: 'Demasiados intentos. Espera unos minutos.' } });
-
-router.post('/login-doc', docLimiter, validate({
-  body: z.object({ docType: z.enum(['CC', 'CE', 'PPT', 'PAS', 'NIT']), docNumber: z.string().trim().regex(/^[0-9A-Za-z-]{4,20}$/, 'Documento inválido') }),
-}), async (req, res) => {
-  if ((req.org.settings?.portalAccess ?? 'documento') !== 'documento') {
-    throw httpError(403, 'CODE_REQUIRED', 'Esta empresa pide un código para entrar');
-  }
-  const { docType, docNumber } = req.valid.body;
-  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: documentHash(req.org._id, docType, docNumber) }).select('status').exec());
-  if (!borrower || borrower.status === 'bloqueado') {
-    throw httpError(404, 'NOT_FOUND', `No encontramos préstamos con ese documento en ${req.org.name}. Revisa el tipo y el número.`);
-  }
-  const token = jwt.sign({ sub: String(borrower._id), org: String(req.org._id) }, env.JWT_ACCESS_SECRET, { audience: 'portal', expiresIn: SESSION });
-  req.borrowerId = borrower._id;
-  await logAccess(req, 'portal.login_doc');
-  res.json({ token, expiresInMinutes: 30 });
+  res.json({ name: req.org.name, logoUrl: req.org.logoUrl || null, country: req.org.country, currency: req.org.currency });
 });
 
 // ---------------------------------------------------------------- Paso 1: documento → código
@@ -91,29 +71,21 @@ router.post('/request-code', codeLimiter, validate({
   body: z.object({ docType: z.enum(['CC', 'CE', 'PPT', 'PAS', 'NIT']), docNumber: z.string().trim().regex(/^[0-9A-Za-z-]{4,20}$/, 'Documento inválido') }),
 }), async (req, res) => {
   const { docType, docNumber } = req.valid.body;
-  const hash = documentHash(req.org._id, docType, docNumber);
-  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: hash }).select('email firstName status').exec()); // .exec() dentro del contexto
-
-  let challenge = new PortalChallenge({ orgId: req.org._id, ip: req.ip, expiresAt: new Date(Date.now() + CODE_MIN * 60_000) });
-  let hint = null;
-
-  if (borrower && borrower.status !== 'bloqueado') {
-    const recent = await PortalChallenge.findOne({ borrowerId: borrower._id, channel: 'email', createdAt: { $gt: new Date(Date.now() - 60_000) } });
-    if (recent) throw httpError(429, 'CODE_COOLDOWN', 'Ya te enviamos un código. Espera un minuto para pedir otro.');
-
-    // El código solo se envía por correo
-    if (borrower.email) {
-      const made = newPortalChallenge({ orgId: req.org._id, borrowerId: borrower._id, channel: 'email', minutes: CODE_MIN, ip: req.ip });
-      challenge = made.challenge;
-      const text = `${req.org.name}: tu código para consultar tus préstamos es ${made.code}. Vence en ${CODE_MIN} minutos. No lo compartas.`;
-      await sendMail({ to: borrower.email, subject: `Tu código de acceso: ${made.code}`, text, html: `<p>Hola ${borrower.firstName},</p><p>Tu código para consultar tus préstamos con <strong>${req.org.name}</strong> es:</p><p style="font-size:30px;letter-spacing:8px;font-weight:bold">${made.code}</p><p>Vence en ${CODE_MIN} minutos. No lo compartas con nadie.</p>` });
-      hint = `tu correo ${maskEmail(borrower.email)}`;
-    }
-    // Sin correo: no se envía nada; la empresa puede generarle un código desde su ficha.
+  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: documentHash(req.org._id, docType, docNumber) }).select('email firstName status').exec());
+  if (!borrower || borrower.status === 'bloqueado') {
+    throw httpError(404, 'NOT_FOUND', `No encontramos préstamos con ese documento en ${req.org.name}. Revisa el tipo y el número.`);
   }
+  if (!borrower.email) {
+    throw httpError(409, 'NO_EMAIL', `No tienes un correo registrado. Pide a ${req.org.name} que registre tu correo para poder entrar.`);
+  }
+  const recent = await PortalChallenge.findOne({ borrowerId: borrower._id, channel: 'email', createdAt: { $gt: new Date(Date.now() - 60_000) } });
+  if (recent) throw httpError(429, 'CODE_COOLDOWN', 'Ya te enviamos un código. Espera un minuto para pedir otro.');
+
+  const { challenge, code } = newPortalChallenge({ orgId: req.org._id, borrowerId: borrower._id, channel: 'email', minutes: CODE_MIN, ip: req.ip });
+  const text = `${req.org.name}: tu código para consultar tus préstamos es ${code}. Vence en ${CODE_MIN} minutos. No lo compartas.`;
+  await sendMail({ to: borrower.email, subject: `Tu código de acceso: ${code}`, text, html: `<p>Hola ${borrower.firstName},</p><p>Tu código para consultar tus préstamos con <strong>${req.org.name}</strong> es:</p><p style="font-size:30px;letter-spacing:8px;font-weight:bold">${code}</p><p>Vence en ${CODE_MIN} minutos. No lo compartas con nadie.</p>` });
   await challenge.save();
-  // Misma respuesta exista o no el documento: nadie puede averiguar quién es cliente
-  res.json({ challengeId: challenge._id, expiresInMinutes: CODE_MIN, sentTo: hint });
+  res.json({ challengeId: challenge._id, expiresInMinutes: CODE_MIN, sentTo: maskEmail(borrower.email) });
 });
 
 // ---------------------------------------------------------------- Paso 2: código → sesión
@@ -139,29 +111,28 @@ router.post('/verify', verifyLimiter, validate({
   res.json({ token, expiresInMinutes: 30 });
 });
 
-router.post('/verify-doc', verifyLimiter, validate({
-  body: z.object({
-    docType: z.enum(['CC', 'CE', 'PPT', 'PAS', 'NIT']),
-    docNumber: z.string().trim().regex(/^[0-9A-Za-z-]{4,20}$/, 'Documento inválido'),
-    code: z.string().trim().regex(/^\d{6}$/, 'El código tiene 6 dígitos'),
-  }),
-}), async (req, res) => {
-  const { docType, docNumber, code } = req.valid.body;
-  const invalid = httpError(400, 'CODE_INVALID', 'Documento o código incorrecto, o el código ya venció');
-  const borrower = await runWithContext({ orgId: req.org._id }, () => Borrower.findOne({ docNumberHash: documentHash(req.org._id, docType, docNumber) }).select('status').exec());
-  if (!borrower || borrower.status === 'bloqueado') throw invalid;
-  const candidates = await PortalChallenge.find({ orgId: req.org._id, borrowerId: borrower._id, verifiedAt: null, expiresAt: { $gt: new Date() }, attempts: { $lt: 5 } })
-    .sort({ createdAt: -1 }).limit(5);
-  const match = candidates.find((c) => sameCode(c, code));
-  if (!match) {
-    if (candidates[0]) { candidates[0].attempts += 1; await candidates[0].save(); }
-    throw invalid;
+// ---------------------------------------------------------------- Entrar con Google
+const google = new OAuth2Client(env.GOOGLE_CLIENT_ID);
+
+router.post('/google', verifyLimiter, validate({ body: z.object({ idToken: z.string().min(10) }) }), async (req, res) => {
+  let payload;
+  try {
+    payload = (await google.verifyIdToken({ idToken: req.valid.body.idToken, audience: env.GOOGLE_CLIENT_ID })).getPayload();
+  } catch {
+    throw httpError(401, 'GOOGLE_TOKEN_INVALID', 'No pudimos validar tu cuenta de Google. Intenta de nuevo.');
   }
-  match.verifiedAt = new Date();
-  await match.save();
-  const token = jwt.sign({ sub: String(borrower._id), org: String(req.org._id) }, env.JWT_ACCESS_SECRET, { audience: 'portal', expiresIn: SESSION });
-  req.borrowerId = borrower._id;
-  await logAccess(req, 'portal.login');
+  if (!payload?.email || !payload.email_verified) throw httpError(401, 'GOOGLE_EMAIL_NOT_VERIFIED', 'Tu correo de Google no está verificado.');
+  const email = payload.email.toLowerCase();
+  const matches = await runWithContext({ orgId: req.org._id }, () => Borrower.find({ email, status: { $ne: 'bloqueado' } }).select('_id').limit(2).exec());
+  if (matches.length === 0) {
+    throw httpError(404, 'EMAIL_NOT_REGISTERED', `El correo ${email} no está registrado en ${req.org.name}. Pide que lo registren en tu ficha o entra con tu documento.`);
+  }
+  if (matches.length > 1) {
+    throw httpError(409, 'EMAIL_SHARED', 'Ese correo está en más de una ficha. Entra con tu documento y el código al correo.');
+  }
+  const token = jwt.sign({ sub: String(matches[0]._id), org: String(req.org._id) }, env.JWT_ACCESS_SECRET, { audience: 'portal', expiresIn: SESSION });
+  req.borrowerId = matches[0]._id;
+  await logAccess(req, 'portal.login_google');
   res.json({ token, expiresInMinutes: 30 });
 });
 
