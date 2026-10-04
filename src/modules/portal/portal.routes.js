@@ -13,11 +13,10 @@ import { sendMail } from '../../services/notifications/mailer.js';
 import { Organization } from '../organizations/organization.model.js';
 import { Borrower } from '../borrowers/borrower.model.js';
 import { Loan } from '../loans/loan.model.js';
-import { Payment } from '../payments/payment.model.js';
-import { getInstallments } from '../loans/loan.service.js';
 import { AuditLog } from '../audit/auditLog.model.js';
 import { PortalChallenge } from './portalChallenge.model.js';
 import { newPortalChallenge, sameCode } from './portal.codes.js';
+import { VISIBLE, LOAN_SUMMARY, loanDetail } from './portal.shared.js';
 
 /**
  * Portal del deudor (cliente de la empresa). Se entra SIEMPRE con el correo registrado en su ficha:
@@ -27,7 +26,6 @@ import { newPortalChallenge, sameCode } from './portal.codes.js';
 const router = Router({ mergeParams: true });
 const CODE_MIN = 10;
 const SESSION = '30m';
-const VISIBLE = ['desembolsado', 'al_dia', 'en_mora', 'reestructurado', 'pagado', 'castigado'];
 
 const codeLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'TOO_MANY', message: 'Demasiados intentos. Espera unos minutos.' } });
 const verifyLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'TOO_MANY', message: 'Demasiados intentos. Espera unos minutos.' } });
@@ -141,30 +139,15 @@ router.get('/me', requirePortal, async (req, res) => {
   const borrower = await Borrower.findById(req.borrowerId).select('firstName lastName docType docNumber phone email');
   if (!borrower) throw httpError(401, 'PORTAL_SESSION_EXPIRED', 'Tu sesión terminó. Ingresa de nuevo.');
   const loans = await Loan.find({ borrowerId: borrower._id, status: { $in: VISIBLE } }).sort({ disbursementDate: -1 })
-    .select('loanNumber principal currency status balancePrincipal balanceInterest balanceLateInterest balanceFees totalPaid daysPastDue nextDueDate nextDueAmount disbursementDate maturityDate amortization frequency termCount rate rateBasis rateAnnual closedAt');
+    .select(LOAN_SUMMARY);
   res.json({ borrower, loans });
 });
 
 router.get('/loans/:id', requirePortal, validate({ params: z.object({ slug: z.string(), id: objectId }) }), async (req, res) => {
-  const loan = await Loan.findOne({ _id: req.valid.params.id, borrowerId: req.borrowerId, status: { $in: VISIBLE } })
-    .select('loanNumber principal currency status balancePrincipal balanceInterest balanceLateInterest balanceFees totalPaid daysPastDue nextDueDate nextDueAmount disbursementDate maturityDate amortization frequency termCount rate rateBasis rateAnnual lateRate lateRateBasis graceDays closedAt');
-  if (!loan) throw httpError(404, 'LOAN_NOT_FOUND', 'Préstamo no encontrado');
-  const [installments, payments] = await Promise.all([
-    getInstallments(loan),
-    Payment.find({ loanId: loan._id }).sort({ paidAt: -1 })
-      .select('receiptNumber amount currency method paidAt status isReversal appliedPrincipal appliedInterest appliedLateInterest appliedFees unappliedAmount'),
-  ]);
+  const detail = await loanDetail(req.valid.params.id, req.borrowerId);
+  if (!detail) throw httpError(404, 'LOAN_NOT_FOUND', 'Préstamo no encontrado');
   await logAccess(req, 'portal.view_loan');
-  res.json({
-    loan,
-    installments: installments.map((i) => ({
-      _id: i._id, number: i.number, dueDate: i.dueDate, status: i.status, daysPastDue: i.daysPastDue,
-      principalDue: i.principalDue, interestDue: i.interestDue, feesDue: i.feesDue, lateInterest: i.lateInterestAccrued,
-      paid: i.principalPaid + i.interestPaid + i.feesPaid + i.lateInterestPaid, waived: i.waived, pending: i.pending,
-    })),
-    payments,
-    company: { name: req.org.name },
-  });
+  res.json({ ...detail, company: { name: req.org.name } });
 });
 
 export default router;

@@ -31,6 +31,7 @@ borrowerSchema.index(
 );
 borrowerSchema.index({ orgId: 1, code: 1 }, { unique: true });
 borrowerSchema.index({ orgId: 1, docNumberHash: 1 });
+borrowerSchema.index({ email: 1 }, { sparse: true }); // portal global: buscar al deudor en todas las empresas
 borrowerSchema.index({ orgId: 1, lastName: 1, firstName: 1 });
 
 borrowerSchema.virtual('fullName').get(function () {

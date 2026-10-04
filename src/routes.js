@@ -16,6 +16,7 @@ import settingsRoutes from './modules/settings/settings.routes.js';
 import supportRoutes from './modules/support/support.routes.js';
 import exportRoutes from './modules/exports/export.routes.js';
 import portalRoutes from './modules/portal/portal.routes.js';
+import globalPortalRoutes from './modules/portal/globalPortal.routes.js';
 import { env } from './config/env.js';
 import { runDailyAccrual } from './jobs/dailyAccrual.js';
 import { checkSubscriptions } from './jobs/subscriptionCheck.js';
@@ -42,6 +43,7 @@ api.get('/health', (_req, res) => {
 api.use('/auth', authRoutes);
 
 // Portal público del deudor: /api/portal/:slug/...
+api.use('/portal-global', globalPortalRoutes);
 api.use('/portal/:slug', portalRoutes);
 
 // Panel de administrador de la plataforma
