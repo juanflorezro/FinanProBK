@@ -24,6 +24,7 @@ const createBody = z.object({
   excessMode: z.enum(['proximas_cuotas', 'capital']).optional(),
   applyTo: z.enum(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion']).default('automatico'),
   targetNumbers: z.array(z.number().int().min(1)).max(600).optional(),
+  components: z.array(z.enum(['mora', 'cargo', 'interes', 'capital'])).max(4).optional(),
   capitalEffect: z.enum(['reducir_cuota', 'reducir_plazo']).default('reducir_cuota'),
   notes: z.string().trim().max(300).optional(),
   idempotencyKey: z.string().min(8).max(100).optional(),

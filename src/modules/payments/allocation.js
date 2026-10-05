@@ -12,7 +12,8 @@ export const FIELDS = {
 /**
  * Modalidades de aplicación (applyTo):
  *  'automatico'  cascada configurada sobre lo vencido y luego el sobrante según excessMode (por defecto)
- *  'cuotas'      paga solo las cuotas elegidas (targetNumbers), cada una en el orden de la cascada
+ *  'cuotas'      paga solo las cuotas elegidas (targetNumbers), cada una en el orden de la cascada;
+ *                con components se limita a ciertos conceptos (ej. solo 'interes' o 'mora' de esos períodos)
  *  'intereses'   solo mora e intereses: lo vencido y el interés del período en curso
  *  'capital'     abono extraordinario a capital (exige estar al día; ver payment.service)
  * La liquidación total ('liquidacion') prepara las cuotas en el servicio y luego usa 'automatico'.
@@ -22,7 +23,7 @@ export const FIELDS = {
  *  'capital'          el sobrante va directo a capital (abono extraordinario)
  * Por defecto: abonos_libres → capital ; planes fijos → proximas_cuotas
  */
-export function allocatePayment({ loan, installments, amount, asOf, waterfall = DEFAULT_WATERFALL, excessMode, applyTo = 'automatico', targetNumbers = [] }) {
+export function allocatePayment({ loan, installments, amount, asOf, waterfall = DEFAULT_WATERFALL, excessMode, applyTo = 'automatico', targetNumbers = [], components = [] }) {
   let remaining = amount;
   let order = 0;
   const allocations = [];
@@ -53,7 +54,9 @@ export function allocatePayment({ loan, installments, amount, asOf, waterfall = 
 
   if (applyTo === 'cuotas') {
     const wanted = new Set(targetNumbers.map(Number));
-    for (const inst of open.filter((i) => wanted.has(i.number))) for (const c of waterfall) apply(inst, c);
+    const comps = components.length ? waterfall.filter((c) => components.includes(c)) : waterfall;
+    // Cuota por cuota, de la más antigua a la más nueva: así un abono parcial cubre primero el período 1
+    for (const inst of open.filter((i) => wanted.has(i.number))) for (const c of comps) apply(inst, c);
     return finish();
   }
 

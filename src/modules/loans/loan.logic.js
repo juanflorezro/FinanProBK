@@ -117,7 +117,10 @@ export function rescheduleRows(loan, installments, asOf, effect = 'reducir_cuota
     frequency: loan.frequency,
     interestBase: loan.interestBase,
     startNumber: future[0].number,
-    initialPrincipal: loan.principal,
+    // Interés simple (o base "capital inicial"): después de un abono a capital, el interés de las cuotas
+    // nuevas se calcula sobre el capital que queda, no sobre el prestado al inicio: no se cobra
+    // interés sobre dinero que el deudor ya devolvió.
+    initialPrincipal: principalForFuture,
   });
   if (principalForFuture <= 0) return { cancel: future, rows: [] };
 

@@ -38,6 +38,7 @@ const paymentSchema = createSchema({
   applyTo: enumOf(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion'], { default: 'automatico' }),
   capitalEffect: enumOf(['reducir_cuota', 'reducir_plazo']),
   targetNumbers: [Number],
+  components: [{ type: String, enum: ['mora', 'cargo', 'interes', 'capital'] }], // conceptos pagados en modo 'cuotas'
   notes: { type: String, maxlength: 300 },
   receiptPdfKey: String,
 });

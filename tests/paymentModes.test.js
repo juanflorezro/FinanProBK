@@ -116,3 +116,38 @@ describe('liquidación anticipada', () => {
     expect(loan.status).toBe('pagado');
   });
 });
+
+describe('interés simple después de un abono a capital', () => {
+  it('el interés de las cuotas nuevas baja con el capital que queda', () => {
+    const { loan, insts } = setup({ amortization: 'interes_simple', termCount: 6, principal: 2_000_000 });
+    const before = insts[1].interestDue;
+    loan.balancePrincipal -= 400_000 * M;
+    const { rows } = rescheduleRows(loan, insts, D('2026-01-15'), 'reducir_cuota');
+    expect(rows[0].interestDue).toBeLessThan(before);
+    expect(rows[0].interestDue).toBe(Math.round((1_600_000 * M) * Number(loan.ratePerPeriod) / 100));
+  });
+});
+
+describe('pagar conceptos de ciertos períodos', () => {
+  it('abono de interés repartido entre el período 1 y el 3, sin tocar capital', () => {
+    const { loan, insts } = setup();
+    const i1 = insts[0].interestDue;
+    const r = allocatePayment({ loan, installments: insts, amount: i1 + 5_000 * M, asOf: D('2026-01-15'), applyTo: 'cuotas', targetNumbers: [1, 3], components: ['interes'] });
+    expect(r.totals.capital).toBe(0);
+    expect(insts[0].interestPaid).toBe(i1);           // el período 1 completo primero
+    expect(insts[2].interestPaid).toBe(5_000 * M);    // el resto al período 3
+    expect(insts[1].interestPaid).toBe(0);
+    expect(r.unapplied).toBe(0);
+  });
+
+  it('solo mora de un período', () => {
+    const { loan, insts } = setup();
+    insts[0].lateInterestAccrued = 3_000 * M;
+    insts[1].lateInterestAccrued = 2_000 * M;
+    const r = allocatePayment({ loan, installments: insts, amount: 4_000 * M, asOf: D('2026-03-15'), applyTo: 'cuotas', targetNumbers: [1, 2], components: ['mora'] });
+    expect(r.totals.mora).toBe(4_000 * M);
+    expect(insts[0].lateInterestPaid).toBe(3_000 * M);
+    expect(insts[1].lateInterestPaid).toBe(1_000 * M);
+    expect(r.totals.interes).toBe(0);
+  });
+});

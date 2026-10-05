@@ -23,7 +23,7 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
   const {
     loanId, amount, method, cashAccountId, idempotencyKey,
     paidAt = new Date(), valueDate, channel = 'oficina', externalReference,
-    applyTo = 'automatico', targetNumbers = [], capitalEffect = 'reducir_cuota', notes,
+    applyTo = 'automatico', targetNumbers = [], components = [], capitalEffect = 'reducir_cuota', notes,
   } = input;
   if (!APPLY_MODES.includes(applyTo)) throw httpError(400, 'INVALID_APPLY_MODE', 'Modalidad de pago inválida');
 
@@ -73,7 +73,12 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
 
     const { allocations, totals, unapplied, needsReschedule } = allocatePayment({
       loan, installments, amount, asOf, waterfall, excessMode: liquidation ? 'proximas_cuotas' : excessMode, applyTo: mode, targetNumbers,
+      components: applyTo === 'cuotas' ? components : [],
     });
+    if (applyTo === 'cuotas' && components.length && unapplied > 0) {
+      const names = { interes: 'intereses', mora: 'mora', cargo: 'cargos', capital: 'capital' };
+      throw httpError(400, 'COMPONENT_EXCEEDED', `En esas cuotas solo hay ${fmt(amount - unapplied)} de ${components.map((c) => names[c]).join(' y ')} por pagar.`);
+    }
     if (applyTo === 'intereses' && unapplied > 0) {
       throw httpError(400, 'INTEREST_EXCEEDED', `Solo hay ${fmt(amount - unapplied)} de intereses y mora para pagar hoy. Para abonar el resto usa "abono a capital" o "automático".`);
     }
@@ -108,6 +113,7 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
       applyTo,
       capitalEffect: applyTo === 'capital' ? capitalEffect : undefined,
       targetNumbers: applyTo === 'cuotas' ? targetNumbers.map(Number) : undefined,
+      components: applyTo === 'cuotas' && components.length ? components : undefined,
       notes,
     }], { session, ordered: true });
 

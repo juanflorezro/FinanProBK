@@ -382,12 +382,13 @@ export function registerTools(server, { api, ctx }) {
 
   server.registerTool('registrar_pago', {
     title: 'Registrar pago',
-    description: 'Registra un pago a un préstamo. Modalidades (aplicar_a): automatico = lo vencido primero en el orden configurado (mora, cargos, interés, capital); cuotas = solo las cuotas indicadas; intereses = solo mora e intereses, el capital no baja; capital = abono extraordinario a capital (exige estar al día; el deudor elige reducir cuota o plazo, Ley 1555 de 2012); liquidacion = pago total del préstamo (usa cotizar_pago_total para el valor). Confirma valor, préstamo, modalidad y caja con el usuario antes.',
+    description: 'Registra un pago a un préstamo. Modalidades (aplicar_a): automatico = lo vencido primero en el orden configurado (mora, cargos, interés, capital); cuotas = solo las cuotas indicadas (opcional: solo ciertos conceptos de esas cuotas, como el interés o la mora de los períodos 1 y 3); intereses = solo mora e intereses, el capital no baja; capital = abono extraordinario a capital (exige estar al día; el deudor elige reducir cuota o plazo, Ley 1555 de 2012); liquidacion = pago total del préstamo (usa cotizar_pago_total para el valor). Confirma valor, préstamo, modalidad y caja con el usuario antes.',
     inputSchema: z.object({
       prestamo: z.string().describe('Número (P000021) o id'),
       valor: z.number().positive().describe('En pesos'),
       aplicar_a: z.enum(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion']).default('automatico'),
       cuotas: z.array(z.number().int().min(1)).optional().describe('Números de cuota, solo con aplicar_a = cuotas'),
+      conceptos: z.array(z.enum(['interes', 'mora', 'cargo', 'capital'])).optional().describe('Con aplicar_a = cuotas: pagar solo esos conceptos de esas cuotas, ej. ["interes"] para abonar intereses del período 1 y 3; se cubre primero la cuota más antigua'),
       efecto_capital: z.enum(['reducir_cuota', 'reducir_plazo']).default('reducir_cuota').describe('Solo con aplicar_a = capital'),
       nota: z.string().max(300).optional(),
       medio: z.enum(METHODS).default('efectivo'),
@@ -403,7 +404,7 @@ export function registerTools(server, { api, ctx }) {
       headers: { 'idempotency-key': randomUUID() },
       body: {
         loanId, amount: cents(a.valor), method: a.medio, cashAccountId, applyTo: a.aplicar_a,
-        ...(a.aplicar_a === 'cuotas' && { targetNumbers: a.cuotas ?? [] }), ...(a.aplicar_a === 'capital' && { capitalEffect: a.efecto_capital }),
+        ...(a.aplicar_a === 'cuotas' && { targetNumbers: a.cuotas ?? [], ...(a.conceptos?.length && { components: a.conceptos }) }), ...(a.aplicar_a === 'capital' && { capitalEffect: a.efecto_capital }),
         ...(a.fecha && { paidAt: a.fecha }), ...(a.referencia && { externalReference: a.referencia }), ...(a.excedente && { excessMode: a.excedente }), ...(a.nota && { notes: a.nota }),
       },
     });
