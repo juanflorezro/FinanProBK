@@ -5,26 +5,7 @@ import request from 'supertest';
 import mongoose from 'mongoose';
 
 // Flujo completo OAuth 2.1 + MCP con la base de datos simulada en memoria.
-const seen = { orgInContext: null };
-vi.mock('../src/modules/dashboard/dashboard.routes.js', () => ({
-  computeDashboard: async () => ({
-    portfolio: { activeLoans: 3, balancePrincipal: 112000000, interestDue: 0, lateInterestDue: 120000, overdueLoans: 1, overdueBalance: 50000000, activeBorrowers: 2, pendingDisbursement: 0 },
-    month: { collected: 9800000, collectedPrincipal: 7000000, collectedInterest: 2800000, payments: 4, disbursed: 0, disbursedLoans: 0 },
-    aging: { al_dia: { count: 2, balance: 62000000 } }, overdue: [], upcoming: [],
-  }),
-}));
-vi.mock('../src/modules/borrowers/borrower.routes.js', async (importOriginal) => {
-  const real = await importOriginal();
-  const { currentOrgId } = await import('../src/db/context.js');
-  return {
-    ...real,
-    createBorrower: async (_org, body) => {
-      seen.orgInContext = String(currentOrgId());
-      if (body.docNumber === '11111111') throw Object.assign(new Error('dup'), { code: 11000 });
-      return { _id: 'b1', code: 'C0007', ...body };
-    },
-  };
-});
+const seen = { payment: null };
 let app;
 const db = { clients: [], codes: [], grants: [] };
 const userId = new mongoose.Types.ObjectId();
@@ -71,12 +52,36 @@ beforeAll(async () => {
   const { errorHandler } = await import('../src/middlewares/errorHandler.js');
   const { authenticate } = await import('../src/middlewares/authenticate.js');
 
+  const helmet = (await import('helmet')).default;
+  const compression = (await import('compression')).default;
+  const { sanitize } = await import('../src/middlewares/sanitize.js');
+  const { validate } = await import('../src/middlewares/validate.js');
+  const { z } = await import('zod');
   app = express();
   app.set('trust proxy', 1);
+  app.use(helmet());
+  app.use(compression());
   app.use(express.json());
+  app.use(sanitize);
   app.use(oauthPublic);
   app.use('/api/oauth', oauthApp);
   app.use('/api/mcp', mcp);
+  // API REST simulada: las herramientas MCP la llaman EN MEMORIA con la sesión del usuario
+  app.get('/api/dashboard', authenticate, (req, res) => res.json({
+    portfolio: { activeLoans: 3, balancePrincipal: 112000000, interestDue: 0, lateInterestDue: 120000, overdueLoans: 1, overdueBalance: 50000000, activeBorrowers: 2, pendingDisbursement: 0 },
+    month: { collected: 9800000, collectedPrincipal: 7000000, collectedInterest: 2800000, payments: 4, disbursed: 0, disbursedLoans: 0 },
+    aging: {}, overdue: [], upcoming: [], recentPayments: [], orgHeader: req.get('x-org-id'),
+  }));
+  app.post('/api/borrowers', authenticate, validate({ body: z.object({ docNumber: z.string().min(4) }).passthrough() }), (req, res) => (req.body.docNumber === '11111111'
+    ? res.status(409).json({ error: 'DUPLICATE', message: 'Ya existe un registro con esos datos' })
+    : res.status(201).json({ _id: 'b1', code: 'C0007', ...req.body })));
+  app.get('/api/loans', authenticate, (req, res) => res.json({ total: 1, page: 1, items: [{ _id: '66f0000000000000000000aa', loanNumber: 'P000021', borrowerId: { firstName: 'Juan', lastName: 'Pérez' }, principal: 100000000, balancePrincipal: 62000000, status: 'al_dia', q: req.query.q }] }));
+  app.get('/api/cash-accounts', authenticate, (_req, res) => res.json([{ _id: 'c1', name: 'Principal', type: 'efectivo', isActive: true }]));
+  app.post('/api/payments', authenticate, (req, res) => {
+    seen.payment = { body: req.body, idem: req.get('idempotency-key') };
+    res.status(201).json({ _id: 'p1', receiptNumber: '000413', amount: req.body.amount, method: req.body.method, status: 'aplicado' });
+  });
+  app.post('/api/members/invitations', authenticate, (_req, res) => res.status(403).json({ error: 'FORBIDDEN', message: 'Tu rol no permite: member.create' }));
   app.use(errorHandler);
 });
 
@@ -93,6 +98,9 @@ describe('OAuth + MCP para ChatGPT', () => {
     const r = await request(app).post('/api/mcp').set(H).set('host', 'api.example.com').set('x-forwarded-proto', 'https').send({ jsonrpc: '2.0', id: 1, method: 'initialize' });
     expect(r.status).toBe(401);
     expect(r.headers['www-authenticate']).toContain('resource_metadata="https://api.example.com/.well-known/oauth-protected-resource/api/mcp"');
+    const g = await request(app).get('/api/mcp').set('host', 'api.example.com').set('x-forwarded-proto', 'https');
+    expect(g.status).toBe(401); // el sondeo GET también descubre OAuth
+    expect(g.headers['www-authenticate']).toContain('resource_metadata=');
     const meta = await request(app).get('/.well-known/oauth-protected-resource/api/mcp').set('host', 'api.example.com').set('x-forwarded-proto', 'https');
     expect(meta.body.resource).toBe('https://api.example.com/api/mcp');
     const as = await request(app).get('/.well-known/oauth-authorization-server').set('host', 'api.example.com').set('x-forwarded-proto', 'https');
@@ -139,14 +147,23 @@ describe('OAuth + MCP para ChatGPT', () => {
 
     const list = await rpc(tokens.access_token, 2, 'tools/list', {});
     const names = list.body.result.tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(['quien_soy', 'resumen_cartera', 'buscar_prestamos', 'registrar_deudor']));
+    expect(names).toEqual(expect.arrayContaining(['quien_soy', 'resumen_cartera', 'buscar_prestamos', 'registrar_deudor', 'crear_prestamo', 'registrar_pago', 'reversar_pago', 'invitar_miembro', 'escribir_a_soporte']));
+    expect(names.length).toBeGreaterThanOrEqual(25);
 
     const resumen = await rpc(tokens.access_token, 3, 'tools/call', { name: 'resumen_cartera', arguments: {} });
     expect(resumen.body.result.structuredContent.cartera.capital_por_cobrar).toBe(1120000);
 
     const nuevo = await rpc(tokens.access_token, 4, 'tools/call', { name: 'registrar_deudor', arguments: { tipo_documento: 'CC', numero_documento: '1002442323', nombres: 'Juan', apellidos: 'Pérez', celular: '300 123 4567' } });
     expect(nuevo.body.result.structuredContent.codigo).toBe('C0007');
-    expect(seen.orgInContext).toBe(String(orgId)); // corre dentro de la empresa del token
+
+    const pago = await rpc(tokens.access_token, 6, 'tools/call', { name: 'registrar_pago', arguments: { prestamo: 'P000021', valor: 150000.5, medio: 'nequi' } });
+    expect(pago.body.result.structuredContent.recibo).toBe('000413');
+    expect(seen.payment.body).toMatchObject({ loanId: '66f0000000000000000000aa', amount: 15000050, method: 'nequi', cashAccountId: 'c1' });
+    expect(seen.payment.idem).toMatch(/^[0-9a-f-]{36}$/);
+
+    const sinPermiso = await rpc(tokens.access_token, 7, 'tools/call', { name: 'invitar_miembro', arguments: { correo: 'x@y.co', rol: 'cobrador' } });
+    expect(sinPermiso.body.result.isError).toBe(true);
+    expect(sinPermiso.body.result.content[0].text).toContain('Tu rol no permite');
 
     const dup = await rpc(tokens.access_token, 5, 'tools/call', { name: 'registrar_deudor', arguments: { tipo_documento: 'CC', numero_documento: '11111111', nombres: 'A', apellidos: 'B', celular: '3001234567' } });
     expect(dup.body.result.isError).toBe(true);
