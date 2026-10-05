@@ -9,7 +9,6 @@ import { AllowedEmail } from './allowedEmail.model.js';
 import { Session } from './session.model.js';
 import { Membership } from '../users/membership.model.js';
 import { createSession, signAccessToken, isTrustedDevice } from './tokens.js';
-import { env } from '../../config/env.js';
 import { sendCode, consumeCode } from './verification.service.js';
 import { signMfaToken, readMfaToken, loadUserWithMfa, verifySecondFactor } from './mfa.service.js';
 import { maskEmail } from '../../utils/crypto.js';
