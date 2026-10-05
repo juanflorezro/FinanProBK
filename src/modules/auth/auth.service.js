@@ -8,7 +8,8 @@ import { AuthIdentity } from './authIdentity.model.js';
 import { AllowedEmail } from './allowedEmail.model.js';
 import { Session } from './session.model.js';
 import { Membership } from '../users/membership.model.js';
-import { createSession, signAccessToken } from './tokens.js';
+import { createSession, signAccessToken, isTrustedDevice } from './tokens.js';
+import { env } from '../../config/env.js';
 import { sendCode, consumeCode } from './verification.service.js';
 import { signMfaToken, readMfaToken, loadUserWithMfa, verifySecondFactor } from './mfa.service.js';
 import { maskEmail } from '../../utils/crypto.js';
@@ -56,7 +57,7 @@ async function finishLogin(user, meta) {
   return { user, accessToken, refreshToken };
 }
 
-export async function loginWithGoogle(idToken, meta) {
+export async function loginWithGoogle(idToken, meta, { trustedDevice } = {}) {
   let payload;
   try {
     const ticket = await google.verifyIdToken({ idToken, audience: env.GOOGLE_CLIENT_ID });
@@ -81,7 +82,7 @@ export async function loginWithGoogle(idToken, meta) {
   if (!identity) await AuthIdentity.create({ userId: user._id, provider: 'google', providerUid: payload.sub, lastUsedAt: new Date() });
   else { identity.lastUsedAt = new Date(); await identity.save(); }
 
-  if (user.mfa?.totpEnabled) return { mfaRequired: true, method: 'totp', mfaToken: signMfaToken(user, 'totp') };
+  if (user.mfa?.totpEnabled && !isTrustedDevice(trustedDevice, user)) return { mfaRequired: true, method: 'totp', mfaToken: signMfaToken(user, 'totp') };
   return finishLogin(user, meta);
 }
 
@@ -148,6 +149,7 @@ export async function resetPassword({ email, code, password }) {
     { upsert: true },
   );
   user.emailVerified = true;
+  user.trustedDevicesRevokedAt = new Date(); // al cambiar la contraseña se vuelve a pedir código en todos los equipos
   await user.save();
   await Session.updateMany({ userId: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
 }
@@ -172,7 +174,7 @@ function assertNotLocked(identity) {
  * - con app de autenticación activa → pide el código de la app
  * - sin ella → envía un código de 6 dígitos al correo
  */
-export async function loginWithEmail({ email, password }) {
+export async function loginWithEmail({ email, password }, meta, { trustedDevice } = {}) {
   email = email.toLowerCase();
   const invalid = httpError(401, 'INVALID_CREDENTIALS', 'Correo o contraseña incorrectos');
   const identity = await AuthIdentity.findOne({ provider: 'password', providerUid: email }).select('+passwordHash');
@@ -185,6 +187,15 @@ export async function loginWithEmail({ email, password }) {
 
   const user = await assertEmailAllowed(email);
   if (!user) throw invalid;
+
+  // Equipo donde ya entró antes con código: no se vuelve a pedir (como Google o Facebook)
+  if (isTrustedDevice(trustedDevice, user)) {
+    identity.failedAttempts = 0;
+    identity.lockedUntil = undefined;
+    identity.lastUsedAt = new Date();
+    await identity.save();
+    return finishLogin(user, meta);
+  }
 
   if (user.mfa?.totpEnabled) {
     return { mfaRequired: true, method: 'totp', mfaToken: signMfaToken(user, 'totp') };
@@ -231,15 +242,28 @@ export async function resendLoginCode(mfaToken) {
 export async function refreshSession(refreshToken, meta) {
   if (!refreshToken) throw httpError(401, 'NO_REFRESH_TOKEN', 'Sesión expirada');
   const session = await Session.findOne({ refreshTokenHash: sha256(refreshToken), kind: { $ne: 'admin' } });
-  if (!session || session.expiresAt < new Date()) throw httpError(401, 'SESSION_EXPIRED', 'Sesión expirada');
+  if (!session || session.expiresAt < new Date()) throw httpError(401, 'SESSION_EXPIRED', 'Tu sesión terminó por inactividad. Vuelve a entrar.');
+  const started = session.familyStartedAt ?? session.createdAt;
+  if (started && Date.now() - started.getTime() > env.SESSION_MAX_DAYS * 86_400_000) {
+    throw httpError(401, 'SESSION_EXPIRED', 'Por seguridad, vuelve a entrar.');
+  }
   if (session.revokedAt) {
-    await Session.updateMany({ userId: session.userId, revokedAt: null }, { $set: { revokedAt: new Date() } });
-    throw httpError(401, 'SESSION_REUSED', 'Sesión inválida, vuelve a iniciar sesión');
+    // Dos pestañas o una recarga rápida pueden refrescar a la vez con el mismo token: si se rotó hace
+    // menos de 1 minuto no es robo, se emite otra sesión de la misma familia.
+    const recentlyRotated = session.replacedById && Date.now() - session.revokedAt.getTime() < 60_000;
+    if (!recentlyRotated) {
+      await Session.updateMany({ userId: session.userId, revokedAt: null }, { $set: { revokedAt: new Date() } });
+      throw httpError(401, 'SESSION_REUSED', 'Sesión inválida, vuelve a iniciar sesión');
+    }
+    const user = await User.findById(session.userId);
+    if (!user || user.status !== 'activo') throw httpError(401, 'USER_INACTIVE', 'Usuario inactivo');
+    const twin = await createSession(user, meta, { familyStartedAt: started });
+    return { user, accessToken: twin.accessToken, refreshToken: twin.refreshToken };
   }
   const user = await User.findById(session.userId);
   if (!user || user.status !== 'activo') throw httpError(401, 'USER_INACTIVE', 'Usuario inactivo');
 
-  const next = await createSession(user, meta);
+  const next = await createSession(user, meta, { familyStartedAt: started ?? new Date() });
   session.revokedAt = new Date();
   session.replacedById = next.session._id;
   await session.save();

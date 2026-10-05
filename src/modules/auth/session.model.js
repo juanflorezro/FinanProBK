@@ -9,6 +9,7 @@ const sessionSchema = createSchema({
   ip: String,
   userAgent: String,
   expiresAt: { type: Date, required: true },
+  familyStartedAt: Date, // cuándo se inició sesión (se conserva al rotar) para el tope absoluto
   revokedAt: Date,
   replacedById: ref('Session'),
 }, { tenant: false, optimisticConcurrency: false });

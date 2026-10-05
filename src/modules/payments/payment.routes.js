@@ -7,7 +7,7 @@ import { objectId, pagination, cents } from '../../utils/schemas.js';
 import { CashAccount } from '../cash/cashAccount.model.js';
 import { Payment, PAYMENT_METHODS } from './payment.model.js';
 import { PaymentAllocation } from './paymentAllocation.model.js';
-import { registerPayment, reversePayment } from './payment.service.js';
+import { registerPayment, reversePayment, previewPayment } from './payment.service.js';
 import { paymentQuery, buildPaymentFilter } from '../../utils/listFilters.js';
 
 const router = Router();
@@ -31,6 +31,17 @@ const createBody = z.object({
 });
 
 /** Header Idempotency-Key (o idempotencyKey en el body) evita pagos duplicados por doble clic. */
+/**
+ * Simular un pago: devuelve cómo se aplicaría y cómo quedaría el préstamo, SIN guardar nada.
+ * Usa exactamente la misma lógica que registrar (dentro de una transacción que se deshace).
+ */
+router.post('/preview', can('payment.create'), validate({ body: createBody }), async (req, res) => {
+  const body = req.valid.body;
+  const cash = await CashAccount.findById(body.cashAccountId);
+  if (!cash?.isActive) throw httpError(404, 'CASH_ACCOUNT_NOT_FOUND', 'Caja no encontrada o inactiva');
+  res.json(await previewPayment(body, { waterfall: req.org.settings.paymentWaterfall, excessMode: body.excessMode }));
+});
+
 router.post('/', can('payment.create'), validate({ body: createBody }), async (req, res) => {
   const body = req.valid.body;
   const idempotencyKey = req.get('idempotency-key') ?? body.idempotencyKey;

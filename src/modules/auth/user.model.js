@@ -5,6 +5,7 @@ import { ref, enumOf } from '../../db/types.js';
 const userSchema = createSchema({
   email: { type: String, required: true, lowercase: true, trim: true },
   emailVerified: { type: Boolean, default: false },
+  trustedDevicesRevokedAt: Date, // invalida los dispositivos de confianza (cambio de contraseña, "cerrar todas")
   name: { type: String, trim: true },
   avatarUrl: String,
   phone: String,

@@ -19,7 +19,26 @@ export const APPLY_MODES = ['automatico', 'cuotas', 'intereses', 'capital', 'liq
  * applyTo: 'automatico' | 'cuotas' (targetNumbers) | 'intereses' | 'capital' (capitalEffect) | 'liquidacion'
  * capitalEffect (Ley 1555 de 2012, lo elige el deudor): 'reducir_cuota' | 'reducir_plazo'
  */
-export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMode } = {}) {
+/** Se lanza para deshacer la transacción de una simulación y devolver el resultado. */
+class DryRun extends Error {
+  constructor(preview) { super('dry-run'); this.preview = preview; }
+}
+
+/**
+ * Simula un pago: ejecuta exactamente la misma lógica que registerPayment dentro de una transacción
+ * y la deshace al final. Nada queda guardado (ni recibo, ni consecutivo, ni cambios de cuotas).
+ */
+export async function previewPayment(input, opts = {}) {
+  try {
+    await registerPayment({ ...input, idempotencyKey: `preview:${Date.now()}:${Math.random()}` }, { ...opts, dryRun: true });
+  } catch (err) {
+    if (err instanceof DryRun) return err.preview;
+    throw err;
+  }
+  throw new Error('La simulación no devolvió resultado');
+}
+
+export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMode, dryRun = false } = {}) {
   const {
     loanId, amount, method, cashAccountId, idempotencyKey,
     paidAt = new Date(), valueDate, channel = 'oficina', externalReference,
@@ -45,6 +64,7 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
     await assertCashOpen(cashAccountId, paidAt, session);
     const asOf = new Date(valueDate ?? paidAt);
     let installments = await getInstallments(loan, session);
+    const numberById = new Map(installments.map((i) => [String(i._id), { number: i.number, dueDate: i.dueDate }]));
     accrueLateInterest(loan, installments, asOf);
 
     const open = installments.filter((i) => !['pagada', 'anulada', 'condonada'].includes(i.status));
@@ -129,6 +149,32 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
     loan.totalPaid += amount;
     loan.lastPaymentAt = paidAt;
     recomputeSummary(loan, installments, asOf);
+
+    if (dryRun) {
+      const per = new Map();
+      for (const a of allocations) {
+        const key = a.installmentId ? String(a.installmentId) : a.component === 'saldo_a_favor' ? 'favor' : 'extra';
+        const row = per.get(key) ?? { ...(numberById.get(key) ?? {}), kind: a.installmentId ? 'cuota' : key, mora: 0, cargo: 0, interes: 0, capital: 0, saldo_a_favor: 0 };
+        row[a.component] = (row[a.component] ?? 0) + a.amount;
+        per.set(key, row);
+      }
+      const active = installments.filter((i) => !['anulada', 'condonada'].includes(i.status)).sort((a, b) => a.number - b.number);
+      throw new DryRun({
+        amount, applyTo, totals, unapplied, rescheduled: needsReschedule || Boolean(liquidation), liquidation,
+        byInstallment: [...per.values()].sort((a, b) => (a.number ?? 9999) - (b.number ?? 9999)),
+        loanAfter: {
+          status: loan.status, balancePrincipal: loan.balancePrincipal, balanceInterest: loan.balanceInterest,
+          balanceLateInterest: loan.balanceLateInterest, daysPastDue: loan.daysPastDue, nextDueDate: loan.nextDueDate,
+          nextDueAmount: loan.nextDueAmount, maturityDate: loan.maturityDate,
+          totalRemaining: active.filter((i) => i.status !== 'pagada').reduce((a, i) => a + i.pending, 0),
+        },
+        schedule: active.map((i) => ({
+          number: i.number, dueDate: i.dueDate, principalDue: i.principalDue, interestDue: i.interestDue,
+          lateInterest: i.lateInterestAccrued, paid: i.totalPaid, pending: i.pending, status: i.status,
+        })),
+      });
+    }
+
     await saveModified(installments, session);
     await loan.save({ session });
     return payment;

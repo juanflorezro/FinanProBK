@@ -380,9 +380,46 @@ export function registerTools(server, { api, ctx }) {
     return ok({ total: r.total, suma: pesos(r.sumAmount), pagina: r.page, pagos: r.items.map(paymentRow) }, `${r.total} pagos, suman ${pesos(r.sumAmount)}.`);
   });
 
+  server.registerTool('simular_pago', {
+    title: 'Simular pago',
+    description: 'Calcula cómo se aplicaría un pago y cómo quedaría el préstamo (saldo, próxima cuota, plan nuevo si cambia) SIN guardar nada. Úsala antes de registrar_pago para mostrarle al usuario el resultado y pedir confirmación. Mismos parámetros que registrar_pago.',
+    inputSchema: z.object({
+      prestamo: z.string().describe('Número (P000021) o id'),
+      valor: z.number().positive().describe('En pesos'),
+      aplicar_a: z.enum(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion']).default('automatico'),
+      cuotas: z.array(z.number().int().min(1)).optional().describe('Números de cuota, solo con aplicar_a = cuotas'),
+      conceptos: z.array(z.enum(['interes', 'mora', 'cargo', 'capital'])).optional().describe('Con aplicar_a = cuotas: pagar solo esos conceptos de esas cuotas, ej. ["interes"] para abonar intereses del período 1 y 3; se cubre primero la cuota más antigua'),
+      efecto_capital: z.enum(['reducir_cuota', 'reducir_plazo']).default('reducir_cuota').describe('Solo con aplicar_a = capital'),
+      nota: z.string().max(300).optional(),
+      medio: z.enum(METHODS).default('efectivo'),
+      caja: z.string().optional().describe('Nombre de la caja; si solo hay una, se usa esa'),
+      fecha: z.string().optional().describe('AAAA-MM-DD, por defecto hoy'),
+      referencia: z.string().max(80).optional(),
+      excedente: z.enum(['proximas_cuotas', 'capital']).optional().describe('Qué hacer si paga de más: adelantar cuotas o abonar a capital'),
+    }), annotations: READ,
+  }, async (a) => {
+    const loanId = await findLoan(a.prestamo);
+    const cashAccountId = await defaultCash(a.caja);
+    const d = await api('POST', '/payments/preview', {
+      body: {
+        loanId, amount: cents(a.valor), method: a.medio, cashAccountId, applyTo: a.aplicar_a,
+        ...(a.aplicar_a === 'cuotas' && { targetNumbers: a.cuotas ?? [], ...(a.conceptos?.length && { components: a.conceptos }) }), ...(a.aplicar_a === 'capital' && { capitalEffect: a.efecto_capital }),
+        ...(a.fecha && { paidAt: a.fecha }), ...(a.excedente && { excessMode: a.excedente }),
+      },
+    });
+    const x = d.loanAfter;
+    return ok({
+      se_aplica: { mora: pesos(d.totals.mora), cargos: pesos(d.totals.cargo), interes: pesos(d.totals.interes), capital: pesos(d.totals.capital), saldo_a_favor: pesos(d.unapplied) },
+      por_cuota: d.byInstallment.map((r) => ({ cuota: r.number ?? (r.kind === 'extra' ? 'abono extraordinario' : 'saldo a favor'), mora: pesos(r.mora), interes: pesos(r.interes), capital: pesos(r.capital) })),
+      prestamo_despues: { estado: x.status, saldo_capital: pesos(x.balancePrincipal), total_por_pagar: pesos(x.totalRemaining), proxima_cuota: day(x.nextDueDate), valor_proxima: pesos(x.nextDueAmount), vence: day(x.maturityDate) },
+      cambia_el_plan: d.rescheduled,
+      plan: d.rescheduled ? d.schedule.map((c) => ({ n: c.number, vence: day(c.dueDate), capital: pesos(c.principalDue), interes: pesos(c.interestDue), pendiente: pesos(c.pending) })) : undefined,
+    }, `Simulación (no guardada): saldo de capital quedaría en ${pesos(x.balancePrincipal)}, estado ${x.status}.`);
+  });
+
   server.registerTool('registrar_pago', {
     title: 'Registrar pago',
-    description: 'Registra un pago a un préstamo. Modalidades (aplicar_a): automatico = lo vencido primero en el orden configurado (mora, cargos, interés, capital); cuotas = solo las cuotas indicadas (opcional: solo ciertos conceptos de esas cuotas, como el interés o la mora de los períodos 1 y 3); intereses = solo mora e intereses, el capital no baja; capital = abono extraordinario a capital (exige estar al día; el deudor elige reducir cuota o plazo, Ley 1555 de 2012); liquidacion = pago total del préstamo (usa cotizar_pago_total para el valor). Confirma valor, préstamo, modalidad y caja con el usuario antes.',
+    description: 'Registra un pago a un préstamo. Modalidades (aplicar_a): automatico = lo vencido primero en el orden configurado (mora, cargos, interés, capital); cuotas = solo las cuotas indicadas (opcional: solo ciertos conceptos de esas cuotas, como el interés o la mora de los períodos 1 y 3); intereses = solo mora e intereses, el capital no baja; capital = abono extraordinario a capital (exige estar al día; el deudor elige reducir cuota o plazo, Ley 1555 de 2012); liquidacion = pago total del préstamo (usa cotizar_pago_total para el valor). Antes de registrar, usa simular_pago y confirma con el usuario el resultado.',
     inputSchema: z.object({
       prestamo: z.string().describe('Número (P000021) o id'),
       valor: z.number().positive().describe('En pesos'),

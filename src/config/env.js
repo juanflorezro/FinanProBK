@@ -8,7 +8,10 @@ const schema = z.object({
   JWT_REFRESH_SECRET: z.string().min(32),
   DATA_HASH_SECRET: z.string().min(32),
   ACCESS_TOKEN_TTL: z.string().default('15m'),
-  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().default(30),
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().default(30), // (obsoleto) ver SESSION_IDLE_HOURS / SESSION_MAX_DAYS
+  SESSION_IDLE_HOURS: z.coerce.number().min(1).default(48),   // sin usar la app este tiempo → hay que volver a entrar
+  SESSION_MAX_DAYS: z.coerce.number().min(1).default(90),     // tope absoluto aunque la use todos los días
+  TRUSTED_DEVICE_DAYS: z.coerce.number().min(0).default(30),  // dispositivo de confianza: no pide el código de nuevo
   GOOGLE_CLIENT_ID: z.string().min(1),
   CORS_ORIGINS: z.string().default('http://localhost:5173'),
   COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),

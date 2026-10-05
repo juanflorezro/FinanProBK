@@ -3,7 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { validate } from '../../middlewares/validate.js';
 import { authenticate } from '../../middlewares/authenticate.js';
-import { REFRESH_COOKIE, refreshCookieOptions } from './tokens.js';
+import { REFRESH_COOKIE, refreshCookieOptions, TRUSTED_COOKIE, trustedCookieOptions, signTrustedDevice } from './tokens.js';
 import {
   loginWithGoogle, startRegistration, completeRegistration, loginWithEmail,
   requestPasswordReset, resetPassword, refreshSession, logout, claimInvitations,
@@ -17,18 +17,20 @@ const router = Router();
 const limiter = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
 
 const meta = (req) => ({ ip: req.ip, userAgent: req.get('user-agent') });
-const send = (res, result, status = 200) => {
+const send = (res, result, status = 200, { trust = false } = {}) => {
   if (result.mfaRequired) return res.status(200).json(result); // falta el segundo factor
   const { user, accessToken, refreshToken } = result;
   res.cookie(REFRESH_COOKIE, refreshToken, refreshCookieOptions());
+  if (trust) res.cookie(TRUSTED_COOKIE, signTrustedDevice(user), trustedCookieOptions()); // este equipo queda de confianza
   res.status(status).json({ accessToken, user: user.toPublic() });
 };
+const trusted = (req) => ({ trustedDevice: req.cookies?.[TRUSTED_COOKIE] });
 
 const email = z.string().trim().toLowerCase().email();
 const password = z.string().min(8, 'Mínimo 8 caracteres').max(128);
 
 router.post('/google', limiter, validate({ body: z.object({ idToken: z.string().min(10) }) }), async (req, res) => {
-  send(res, await loginWithGoogle(req.valid.body.idToken, meta(req)));
+  send(res, await loginWithGoogle(req.valid.body.idToken, meta(req), trusted(req)), 200, { trust: true });
 });
 
 const code = z.string().trim().regex(/^\d{6}$/, 'El código tiene 6 dígitos');
@@ -43,7 +45,7 @@ router.post('/register/start', codeLimiter, validate({ body: z.object({ email })
 router.post('/register/complete', limiter, validate({
   body: z.object({ email, code, password, name: z.string().trim().min(2).max(80) }),
 }), async (req, res) => {
-  send(res, await completeRegistration(req.valid.body, meta(req)), 201);
+  send(res, await completeRegistration(req.valid.body, meta(req)), 201, { trust: true });
 });
 
 router.post('/password/forgot', codeLimiter, validate({ body: z.object({ email }) }), async (req, res) => {
@@ -58,7 +60,7 @@ router.post('/password/reset', limiter, validate({ body: z.object({ email, code,
 
 // Paso 1: contraseña → responde { mfaRequired, method: 'email' | 'totp', mfaToken }
 router.post('/login', limiter, validate({ body: z.object({ email, password: z.string().min(1) }) }), async (req, res) => {
-  send(res, await loginWithEmail(req.valid.body));
+  send(res, await loginWithEmail(req.valid.body, meta(req), trusted(req)), 200, { trust: true });
 });
 
 // Paso 2: código del correo, de la app o de respaldo
@@ -66,7 +68,7 @@ const mfaToken = z.string().min(20);
 router.post('/login/verify', limiter, validate({
   body: z.object({ mfaToken, code: z.string().trim().min(6).max(12) }),
 }), async (req, res) => {
-  send(res, await completeLoginMfa(req.valid.body, meta(req)));
+  send(res, await completeLoginMfa(req.valid.body, meta(req)), 200, { trust: true });
 });
 
 router.post('/login/resend', codeLimiter, validate({ body: z.object({ mfaToken }) }), async (req, res) => {
