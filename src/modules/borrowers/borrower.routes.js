@@ -31,16 +31,17 @@ const fields = {
   assignedCollectorId: objectId.optional(),
 };
 
-router.post('/', can('borrower.create'), validate({ body: z.object(fields) }), async (req, res) => {
-  const body = req.valid.body;
-  await assertPlanLimit(req.org, 'maxBorrowers');
-  const code = await nextSeq(req.org._id, 'borrower');
-  const borrower = await Borrower.create({
-    ...body,
-    code: `C${code}`,
-    docNumberHash: documentHash(req.org._id, body.docType, body.docNumber),
-  });
-  res.status(201).json(borrower);
+export const borrowerFields = z.object(fields);
+
+/** Crea un deudor (requiere contexto de la organización). Lo usan la app y el MCP. */
+export async function createBorrower(org, body) {
+  await assertPlanLimit(org, 'maxBorrowers');
+  const code = await nextSeq(org._id, 'borrower');
+  return Borrower.create({ ...body, code: `C${code}`, docNumberHash: documentHash(org._id, body.docType, body.docNumber) });
+}
+
+router.post('/', can('borrower.create'), validate({ body: borrowerFields }), async (req, res) => {
+  res.status(201).json(await createBorrower(req.org, req.valid.body));
 });
 
 router.get('/', can('borrower.read'), validate({ query: pagination.merge(borrowerQuery) }), async (req, res) => {

@@ -8,8 +8,8 @@ import { Borrower } from '../borrowers/borrower.model.js';
 
 const router = Router();
 
-/** Tablero de la organización. Todo queda filtrado por orgId (plugin de tenant). */
-router.get('/', can('loan.read'), async (_req, res) => {
+/** Tablero de la organización (requiere contexto de la organización). Lo usan la app y el MCP. */
+export async function computeDashboard() {
   const now = new Date();
   const today = dayjs(now).startOf('day').toDate();
   const in7 = dayjs(now).add(7, 'day').endOf('day').toDate();
@@ -52,7 +52,7 @@ router.get('/', can('loan.read'), async (_req, res) => {
   const sum = (arr, k) => arr.reduce((a, x) => a + (x[k] ?? 0), 0);
   const mp = monthPayments[0] ?? { total: 0, principal: 0, interest: 0, lateInterest: 0, fees: 0, count: 0 };
 
-  res.json({
+  return {
     portfolio: {
       activeLoans: sum(open, 'count'),
       principalLent: sum(open, 'principal'),
@@ -78,7 +78,11 @@ router.get('/', can('loan.read'), async (_req, res) => {
     upcoming: upcoming.filter((i) => i.loanId && OPEN_STATUS.includes(i.loanId.status)),
     overdue,
     recentPayments,
-  });
+  };
+}
+
+router.get('/', can('loan.read'), async (_req, res) => {
+  res.json(await computeDashboard());
 });
 
 export default router;

@@ -20,6 +20,7 @@ const schema = z.object({
   MAIL_FROM: z.string().default('Préstamos <no-reply@localhost>'),
   MONGO_AUTO_INDEX: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   CRON_SECRET: z.string().optional(),
+  API_PUBLIC_URL: z.string().url().optional(), // URL pública del backend (para OAuth/MCP); si no, se toma del Host
 });
 
 const parsed = schema.safeParse(process.env);

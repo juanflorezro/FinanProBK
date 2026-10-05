@@ -17,6 +17,8 @@ import supportRoutes from './modules/support/support.routes.js';
 import exportRoutes from './modules/exports/export.routes.js';
 import portalRoutes from './modules/portal/portal.routes.js';
 import globalPortalRoutes from './modules/portal/globalPortal.routes.js';
+import { oauthApp } from './modules/oauth/oauth.routes.js';
+import mcpRoutes from './modules/mcp/mcp.routes.js';
 import { env } from './config/env.js';
 import { runDailyAccrual } from './jobs/dailyAccrual.js';
 import { checkSubscriptions } from './jobs/subscriptionCheck.js';
@@ -44,6 +46,10 @@ api.use('/auth', authRoutes);
 
 // Portal público del deudor: /api/portal/:slug/...
 api.use('/portal-global', globalPortalRoutes);
+
+// MCP para ChatGPT/Claude (OAuth) y la autorización desde la app
+api.use('/oauth', oauthApp);
+api.use('/mcp', mcpRoutes);
 api.use('/portal/:slug', portalRoutes);
 
 // Panel de administrador de la plataforma

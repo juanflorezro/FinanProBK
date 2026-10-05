@@ -9,6 +9,7 @@ import { corsOrigins, isProd, isServerless } from './config/env.js';
 import { sanitize } from './middlewares/sanitize.js';
 import { notFound, errorHandler } from './middlewares/errorHandler.js';
 import api from './routes.js';
+import { oauthPublic } from './modules/oauth/oauth.routes.js';
 
 export function createApp() {
   const app = express();
@@ -34,6 +35,7 @@ export function createApp() {
   app.use(cookieParser());
   app.use(sanitize);
 
+  app.use(oauthPublic);   // /.well-known/* y /oauth/* (OAuth para el MCP)
   app.use('/api', api);
 
   app.use(notFound);
