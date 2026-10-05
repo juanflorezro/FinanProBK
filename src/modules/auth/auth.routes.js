@@ -22,7 +22,10 @@ const send = (res, result, status = 200, { trust = false } = {}) => {
   const { user, accessToken, refreshToken } = result;
   res.cookie(REFRESH_COOKIE, refreshToken, refreshCookieOptions());
   if (trust) res.cookie(TRUSTED_COOKIE, signTrustedDevice(user), trustedCookieOptions()); // este equipo queda de confianza
-  res.status(status).json({ accessToken, user: user.toPublic() });
+  // Respaldo cuando el navegador bloquea la cookie (Safari, bloqueo de terceros): la app guarda el
+  // refresh token y lo envía en el cuerpo. Solo si lo pide con X-Session-Mode: token.
+  const tokenMode = res.req?.get?.('x-session-mode') === 'token';
+  res.status(status).json({ accessToken, user: user.toPublic(), ...(tokenMode && { refreshToken }) });
 };
 const trusted = (req) => ({ trustedDevice: req.cookies?.[TRUSTED_COOKIE] });
 
@@ -96,11 +99,11 @@ router.post('/mfa/backup-codes', authenticate, limiter, validate({ body: totpCod
 });
 
 router.post('/refresh', limiter, async (req, res) => {
-  send(res, await refreshSession(req.cookies?.[REFRESH_COOKIE], meta(req)));
+  send(res, await refreshSession(req.cookies?.[REFRESH_COOKIE] ?? req.body?.refreshToken, meta(req)));
 });
 
 router.post('/logout', async (req, res) => {
-  await logout(req.cookies?.[REFRESH_COOKIE]);
+  await logout(req.cookies?.[REFRESH_COOKIE] ?? req.body?.refreshToken);
   res.clearCookie(REFRESH_COOKIE, { ...refreshCookieOptions(), maxAge: undefined });
   res.status(204).end();
 });

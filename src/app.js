@@ -28,7 +28,7 @@ export function createApp() {
   app.use(cors({
     origin: corsOrigins,
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'Idempotency-Key', 'X-Request-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'Idempotency-Key', 'X-Request-Id', 'X-Session-Mode'],
   }));
   app.use(compression());
   app.use(express.json({ limit: '1mb' }));
