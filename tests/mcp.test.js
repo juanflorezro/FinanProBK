@@ -76,6 +76,7 @@ beforeAll(async () => {
     ? res.status(409).json({ error: 'DUPLICATE', message: 'Ya existe un registro con esos datos' })
     : res.status(201).json({ _id: 'b1', code: 'C0007', ...req.body })));
   app.get('/api/loans', authenticate, (req, res) => res.json({ total: 1, page: 1, items: [{ _id: '66f0000000000000000000aa', loanNumber: 'P000021', borrowerId: { firstName: 'Juan', lastName: 'Pérez' }, principal: 100000000, balancePrincipal: 62000000, status: 'al_dia', q: req.query.q }] }));
+  app.get('/api/loans/:id', authenticate, (req, res) => res.json({ loan: { _id: req.params.id, loanNumber: 'P000021', borrowerId: { firstName: 'Juan', lastName: 'Pérez' }, balancePrincipal: 61000000, balanceInterest: 0, balanceLateInterest: 0, status: 'al_dia', daysPastDue: 0 }, installments: [], payments: [] }));
   app.get('/api/cash-accounts', authenticate, (_req, res) => res.json([{ _id: 'c1', name: 'Principal', type: 'efectivo', isActive: true }]));
   app.post('/api/payments', authenticate, (req, res) => {
     seen.payment = { body: req.body, idem: req.get('idempotency-key') };
@@ -158,6 +159,8 @@ describe('OAuth + MCP para ChatGPT', () => {
 
     const pago = await rpc(tokens.access_token, 6, 'tools/call', { name: 'registrar_pago', arguments: { prestamo: 'P000021', valor: 150000.5, medio: 'nequi' } });
     expect(pago.body.result.structuredContent.recibo).toBe('000413');
+    expect(pago.body.result.structuredContent).toMatchObject({ prestamo: 'P000021', deudor: 'Juan Pérez', caja: 'Principal' });
+    expect(pago.body.result.structuredContent.prestamo_despues.saldo_capital).toBe(610000);
     expect(seen.payment.body).toMatchObject({ loanId: '66f0000000000000000000aa', amount: 15000050, method: 'nequi', cashAccountId: 'c1' });
     expect(seen.payment.idem).toMatch(/^[0-9a-f-]{36}$/);
 

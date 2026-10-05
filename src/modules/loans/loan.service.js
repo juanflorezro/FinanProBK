@@ -97,13 +97,14 @@ export function refreshLoan(loanId, asOf = new Date()) {
 }
 
 /** Abono extraordinario en plan fijo: regenera las cuotas futuras. Usar dentro de una transacción. */
-export async function applyReschedule(loan, installments, asOf, session) {
-  const { cancel, rows } = rescheduleRows(loan, installments, asOf);
+export async function applyReschedule(loan, installments, asOf, session, effect = 'reducir_cuota') {
+  const { cancel, rows } = rescheduleRows(loan, installments, asOf, effect);
   if (!cancel.length) return installments;
   for (const inst of cancel) inst.status = 'anulada';
   await saveModified(cancel, session);
   loan.scheduleVersion += 1;
   const created = await createInstallments(loan, rows, session);
+  if (created.length && loan.amortization !== 'abonos_libres') loan.maturityDate = created.at(-1).dueDate; // con 'reducir_plazo' termina antes
   const cancelled = new Set(cancel.map((i) => String(i._id)));
   return [...installments.filter((i) => !cancelled.has(String(i._id))), ...created];
 }

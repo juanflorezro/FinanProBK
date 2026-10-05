@@ -7,7 +7,7 @@ import { objectId, pagination, cents, rateValue } from '../../utils/schemas.js';
 import { RATE_BASES, FREQUENCIES } from '../../utils/rates.js';
 import { nextSeq } from '../counters/counter.model.js';
 import { Borrower } from '../borrowers/borrower.model.js';
-import { Loan, LOAN_STATUS, AMORTIZATION } from './loan.model.js';
+import { Loan, LOAN_STATUS, AMORTIZATION, OPEN_STATUS } from './loan.model.js';
 import { Payment } from '../payments/payment.model.js';
 import { disburseLoan, refreshLoan, getInstallments } from './loan.service.js';
 import { assertPlanLimit } from '../../utils/planLimits.js';
@@ -16,6 +16,11 @@ import { loanQuery, buildLoanFilter } from '../../utils/listFilters.js';
 import { buildSchedule } from './schedule.js';
 import { deriveRates } from '../../utils/rates.js';
 import { addPeriods } from '../../utils/dates.js';
+
+import { CashAccount } from '../cash/cashAccount.model.js';
+import { CashMovement } from '../cash/cash.models.js';
+import { assertCashOpen } from '../cash/cash.service.js';
+import { accrueLateInterest, computePayoff } from './loan.logic.js';
 
 const router = Router();
 const idParam = { params: z.object({ id: objectId }) };
@@ -125,9 +130,41 @@ router.get('/:id', can('loan.read'), validate(idParam), async (req, res) => {
 
 router.post('/:id/disburse', can('loan.disburse'), validate({
   ...idParam,
-  body: z.object({ disbursementDate: z.coerce.date().optional(), firstDueDate: z.coerce.date().optional() }),
+  body: z.object({
+    disbursementDate: z.coerce.date().optional(),
+    firstDueDate: z.coerce.date().optional(),
+    cashAccountId: objectId.optional(), // caja de donde sale el dinero (queda como egreso)
+  }),
 }), async (req, res) => {
-  res.json(await disburseLoan(req.valid.params.id, req.valid.body));
+  const { cashAccountId, ...opts } = req.valid.body;
+  const date = opts.disbursementDate ?? new Date();
+  if (cashAccountId) {
+    const cash = await CashAccount.findById(cashAccountId);
+    if (!cash?.isActive) throw httpError(404, 'CASH_ACCOUNT_NOT_FOUND', 'Caja no encontrada o inactiva');
+    await assertCashOpen(cashAccountId, date);
+  }
+  const loan = await disburseLoan(req.valid.params.id, opts);
+  if (cashAccountId && loan?.status !== 'solicitud') {
+    await CashMovement.create({
+      cashAccountId, type: 'desembolso', amount: loan.principal, signedAmount: -loan.principal, date,
+      concept: `Desembolso préstamo ${loan.loanNumber}`, loanId: loan._id, createdByMembershipId: req.membership._id,
+    });
+  }
+  res.json(loan);
+});
+
+/**
+ * Cotización de pago total (liquidación) a una fecha, sin guardar nada.
+ * Ley 1555 de 2012: prepago sin penalidad; intereses solo hasta el día del pago.
+ */
+router.get('/:id/payoff', can('loan.read'), validate({ ...idParam, query: z.object({ date: z.coerce.date().optional() }) }), async (req, res) => {
+  const loan = await Loan.findById(req.valid.params.id);
+  if (!loan) throw httpError(404, 'LOAN_NOT_FOUND', 'Préstamo no encontrado');
+  if (!OPEN_STATUS.includes(loan.status)) throw httpError(409, 'LOAN_NOT_OPEN', 'El préstamo no está activo');
+  const asOf = req.valid.query.date ?? new Date();
+  const installments = await getInstallments(loan);
+  accrueLateInterest(loan, installments, asOf); // solo en memoria
+  res.json(computePayoff(loan, installments, asOf));
 });
 
 router.post('/:id/refresh', can('loan.read'), validate(idParam), async (req, res) => {

@@ -9,7 +9,10 @@ const cashAccountSchema = createSchema({
   accountMask: { type: String, maxlength: 4 },
   currency: { type: String, default: 'COP', uppercase: true },
   custodianMembershipId: ref('Membership'),
-  currentBalance: money(),
+  currentBalance: money(),     // (obsoleto) el saldo se calcula con pagos + movimientos
+  openingBalance: money(),     // saldo inicial al crear la caja
+  openingDate: { type: Date, default: Date.now },
+  notes: { type: String, maxlength: 300 },
   isActive: { type: Boolean, default: true },
 });
 

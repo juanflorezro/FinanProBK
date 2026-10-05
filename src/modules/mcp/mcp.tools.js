@@ -45,9 +45,11 @@ const paymentRow = (p) => ({
 
 export function registerTools(server, { api, ctx }) {
   // ---------------- resolvedores: aceptan id, número o texto
+  const known = { loans: new Map(), cash: new Map() };
   async function findLoan(ref) {
     if (isId(ref)) return ref;
     const r = await api('GET', '/loans', { query: { q: ref, limit: 10 } });
+    r.items.forEach((l) => known.loans.set(String(l._id), l));
     const exact = r.items.find((l) => l.loanNumber.toLowerCase() === String(ref).toLowerCase());
     if (exact) return exact._id;
     if (r.items.length === 1) return r.items[0]._id;
@@ -74,6 +76,7 @@ export function registerTools(server, { api, ctx }) {
   }
   async function defaultCash(name) {
     const list = await api('GET', '/cash-accounts');
+    list.forEach((c) => known.cash.set(String(c._id), c));
     if (!list.length) throw new Error('La empresa no tiene cajas. Crea una con crear_caja.');
     if (name) {
       const c = list.find((x) => x.name.toLowerCase() === String(name).toLowerCase()) ?? list.find((x) => x.name.toLowerCase().includes(String(name).toLowerCase()));
@@ -310,6 +313,7 @@ export function registerTools(server, { api, ctx }) {
       dias_gracia: z.number().int().min(0).max(90).optional(),
       notas: z.string().max(1000).optional(),
       desembolsar_ahora: z.boolean().default(true),
+      caja_desembolso: z.string().optional().describe('Caja de donde sale el dinero'),
       fecha_desembolso: z.string().optional().describe('AAAA-MM-DD, por defecto hoy'),
       primera_cuota: z.string().optional().describe('AAAA-MM-DD'),
       confirmar_tasa_sobre_tope: z.boolean().optional().describe('Solo si el usuario confirmó crearlo aunque la tasa supere el tope legal'),
@@ -323,7 +327,8 @@ export function registerTools(server, { api, ctx }) {
       },
     });
     if (!a.desembolsar_ahora) return ok({ id: loan._id, prestamo: loan.loanNumber, estado: loan.status }, `Préstamo ${loan.loanNumber} creado (sin desembolsar).`);
-    const d = await api('POST', `/loans/${loan._id}/disburse`, { body: { ...(a.fecha_desembolso && { disbursementDate: a.fecha_desembolso }), ...(a.primera_cuota && { firstDueDate: a.primera_cuota }) } });
+    const cashOut = a.caja_desembolso ? await defaultCash(a.caja_desembolso) : undefined;
+    const d = await api('POST', `/loans/${loan._id}/disburse`, { body: { ...(a.fecha_desembolso && { disbursementDate: a.fecha_desembolso }), ...(a.primera_cuota && { firstDueDate: a.primera_cuota }), ...(cashOut && { cashAccountId: cashOut }) } });
     const l = d.loan ?? d;
     return ok({ id: loan._id, prestamo: loan.loanNumber, estado: l.status, proxima_cuota: day(l.nextDueDate), valor_proxima: pesos(l.nextDueAmount), vence: day(l.maturityDate) },
       `Préstamo ${loan.loanNumber} creado y desembolsado.`);
@@ -332,10 +337,11 @@ export function registerTools(server, { api, ctx }) {
   server.registerTool('desembolsar_prestamo', {
     title: 'Desembolsar préstamo',
     description: 'Desembolsa un préstamo en solicitud o aprobado y genera su plan de cuotas.',
-    inputSchema: z.object({ prestamo: z.string(), fecha_desembolso: z.string().optional(), primera_cuota: z.string().optional() }), annotations: WRITE,
+    inputSchema: z.object({ prestamo: z.string(), fecha_desembolso: z.string().optional(), primera_cuota: z.string().optional(), caja: z.string().optional().describe('Caja de donde sale el dinero (queda como egreso)') }), annotations: WRITE,
   }, async (a) => {
     const id = await findLoan(a.prestamo);
-    const d = await api('POST', `/loans/${id}/disburse`, { body: { ...(a.fecha_desembolso && { disbursementDate: a.fecha_desembolso }), ...(a.primera_cuota && { firstDueDate: a.primera_cuota }) } });
+    const cashAccountId = a.caja ? await defaultCash(a.caja) : undefined;
+    const d = await api('POST', `/loans/${id}/disburse`, { body: { ...(a.fecha_desembolso && { disbursementDate: a.fecha_desembolso }), ...(a.primera_cuota && { firstDueDate: a.primera_cuota }), ...(cashAccountId && { cashAccountId }) } });
     const l = d.loan ?? d;
     return ok({ prestamo: l.loanNumber, estado: l.status, proxima_cuota: day(l.nextDueDate), valor_proxima: pesos(l.nextDueAmount) }, `Préstamo ${l.loanNumber} desembolsado.`);
   });
@@ -376,10 +382,14 @@ export function registerTools(server, { api, ctx }) {
 
   server.registerTool('registrar_pago', {
     title: 'Registrar pago',
-    description: 'Registra un pago a un préstamo; se aplica automáticamente en el orden configurado (mora, cargos, interés, capital). Confirma valor, préstamo y caja con el usuario antes.',
+    description: 'Registra un pago a un préstamo. Modalidades (aplicar_a): automatico = lo vencido primero en el orden configurado (mora, cargos, interés, capital); cuotas = solo las cuotas indicadas; intereses = solo mora e intereses, el capital no baja; capital = abono extraordinario a capital (exige estar al día; el deudor elige reducir cuota o plazo, Ley 1555 de 2012); liquidacion = pago total del préstamo (usa cotizar_pago_total para el valor). Confirma valor, préstamo, modalidad y caja con el usuario antes.',
     inputSchema: z.object({
       prestamo: z.string().describe('Número (P000021) o id'),
       valor: z.number().positive().describe('En pesos'),
+      aplicar_a: z.enum(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion']).default('automatico'),
+      cuotas: z.array(z.number().int().min(1)).optional().describe('Números de cuota, solo con aplicar_a = cuotas'),
+      efecto_capital: z.enum(['reducir_cuota', 'reducir_plazo']).default('reducir_cuota').describe('Solo con aplicar_a = capital'),
+      nota: z.string().max(300).optional(),
       medio: z.enum(METHODS).default('efectivo'),
       caja: z.string().optional().describe('Nombre de la caja; si solo hay una, se usa esa'),
       fecha: z.string().optional().describe('AAAA-MM-DD, por defecto hoy'),
@@ -391,10 +401,16 @@ export function registerTools(server, { api, ctx }) {
     const cashAccountId = await defaultCash(a.caja);
     const p = await api('POST', '/payments', {
       headers: { 'idempotency-key': randomUUID() },
-      body: { loanId, amount: cents(a.valor), method: a.medio, cashAccountId, ...(a.fecha && { paidAt: a.fecha }), ...(a.referencia && { externalReference: a.referencia }), ...(a.excedente && { excessMode: a.excedente }) },
+      body: {
+        loanId, amount: cents(a.valor), method: a.medio, cashAccountId, applyTo: a.aplicar_a,
+        ...(a.aplicar_a === 'cuotas' && { targetNumbers: a.cuotas ?? [] }), ...(a.aplicar_a === 'capital' && { capitalEffect: a.efecto_capital }),
+        ...(a.fecha && { paidAt: a.fecha }), ...(a.referencia && { externalReference: a.referencia }), ...(a.excedente && { excessMode: a.excedente }), ...(a.nota && { notes: a.nota }),
+      },
     });
     const pay = p.payment ?? p;
-    return ok(paymentRow(pay), `Pago registrado: recibo ${pay.receiptNumber} por ${pesos(pay.amount)}.`);
+    const loan = (await api('GET', `/loans/${loanId}`)).loan; // estado del préstamo DESPUÉS del pago
+    const row = paymentRow({ ...pay, loanId: loan, borrowerId: loan?.borrowerId, cashAccountId: known.cash.get(String(cashAccountId)) });
+    return ok({ ...row, prestamo_despues: { saldo_capital: pesos(loan?.balancePrincipal), interes_vencido: pesos(loan?.balanceInterest), mora: pesos(loan?.balanceLateInterest), dias_atraso: loan?.daysPastDue, estado: loan?.status, proxima_cuota: day(loan?.nextDueDate), valor_proxima: pesos(loan?.nextDueAmount) } }, `Pago registrado: recibo ${pay.receiptNumber} por ${pesos(pay.amount)} al préstamo ${loan?.loanNumber} de ${fullName(loan?.borrowerId)}, caja ${row.caja}.`);
   });
 
   server.registerTool('reversar_pago', {
@@ -414,8 +430,8 @@ export function registerTools(server, { api, ctx }) {
     description: 'Cajas registradoras o cuentas donde entra el dinero de los pagos.',
     inputSchema: z.object({ incluir_inactivas: z.boolean().optional() }), annotations: READ,
   }, async ({ incluir_inactivas }) => {
-    const list = await api('GET', '/cash-accounts', { query: { todas: incluir_inactivas ? '1' : undefined } });
-    return ok({ cajas: list.map((c) => ({ id: c._id, nombre: c.name, tipo: c.type, banco: c.bankName ?? null, activa: c.isActive })) }, `${list.length} cajas.`);
+    const list = await api('GET', '/cash-accounts', { query: { todas: incluir_inactivas ? '1' : undefined, saldos: '1' } });
+    return ok({ cajas: list.map((c) => ({ id: c._id, nombre: c.name, tipo: c.type, banco: c.bankName ?? null, activa: c.isActive, saldo: pesos(c.balance), ultimo_cierre: day(c.lastClosingDate) })) }, `${list.length} cajas.`);
   });
 
   server.registerTool('crear_caja', {
@@ -424,10 +440,100 @@ export function registerTools(server, { api, ctx }) {
     inputSchema: z.object({
       nombre: z.string().min(2).max(60), tipo: z.enum(['efectivo', 'banco', 'billetera_digital']).default('efectivo'),
       banco: z.string().max(60).optional(), ultimos_4_digitos: z.string().regex(/^\d{4}$/).optional(),
+      saldo_inicial: z.number().min(0).optional().describe('En pesos'),
     }), annotations: WRITE,
   }, async (a) => {
-    const c = await api('POST', '/cash-accounts', { body: { name: a.nombre, type: a.tipo, ...(a.banco && { bankName: a.banco }), ...(a.ultimos_4_digitos && { accountMask: a.ultimos_4_digitos }) } });
+    const c = await api('POST', '/cash-accounts', { body: { name: a.nombre, type: a.tipo, ...(a.banco && { bankName: a.banco }), ...(a.ultimos_4_digitos && { accountMask: a.ultimos_4_digitos }), ...(a.saldo_inicial && { openingBalance: cents(a.saldo_inicial) }) } });
     return ok({ id: c._id, nombre: c.name, tipo: c.type }, `Caja ${c.name} creada.`);
+  });
+
+  server.registerTool('cotizar_pago_total', {
+    title: 'Cotizar pago total',
+    description: 'Cuánto debe pagar el deudor para cancelar el préstamo en una fecha: capital pendiente, interés vencido, interés del período por días corridos y mora (Ley 1555 de 2012: sin penalidad). No guarda nada.',
+    inputSchema: z.object({ prestamo: z.string(), fecha: z.string().optional().describe('AAAA-MM-DD, por defecto hoy') }), annotations: READ,
+  }, async ({ prestamo, fecha }) => {
+    const id = await findLoan(prestamo);
+    const p = await api('GET', `/loans/${id}/payoff`, { query: { date: fecha } });
+    return ok({ fecha: day(p.asOf), capital: pesos(p.principal), interes_vencido: pesos(p.overdueInterest), interes_periodo_hasta_hoy: pesos(p.currentInterest), mora: pesos(p.lateInterest), cargos: pesos(p.fees), total: pesos(p.total) },
+      `Para cancelar el préstamo hoy: ${pesos(p.total)}.`);
+  });
+
+  server.registerTool('ver_caja', {
+    title: 'Ver caja',
+    description: 'Saldo, resumen del periodo (pagos, ingresos, salidas) y libro de caja con saldo corrido de una caja.',
+    inputSchema: z.object({ caja: z.string().describe('Nombre de la caja'), desde: z.string().optional(), hasta: z.string().optional() }), annotations: READ,
+  }, async (a) => {
+    const id = await defaultCash(a.caja);
+    const q = { from: a.desde, to: a.hasta };
+    const [s, l] = await Promise.all([api('GET', `/cash-accounts/${id}/summary`, { query: q }), api('GET', `/cash-accounts/${id}/ledger`, { query: { ...q, limit: 60 } })]);
+    return ok({
+      caja: s.cash.name, saldo_actual: pesos(s.balance), periodo: { saldo_inicial: pesos(s.opening), pagos: pesos(s.payments), cantidad_pagos: s.paymentsCount, otros_ingresos: pesos(s.inflows), salidas: pesos(s.outflows), saldo_final: pesos(s.closing), por_medio: Object.fromEntries(Object.entries(s.byMethod ?? {}).map(([k, v]) => [k, pesos(v)])) },
+      ultimo_cierre: day(s.lastClosing?.date), movimientos: l.rows.map((r) => ({ fecha: day(r.date), tipo: r.kind, concepto: r.concept, referencia: r.reference || null, valor: pesos(r.amount), saldo: pesos(r.balance), anulado: r.voided || undefined })),
+    }, `${s.cash.name}: saldo ${pesos(s.balance)}.`);
+  });
+
+  server.registerTool('editar_caja', {
+    title: 'Editar caja',
+    description: 'Cambia nombre, tipo, banco, últimos 4 dígitos o notas de una caja, o la activa/desactiva (para desactivar el saldo debe estar en cero). El saldo inicial solo se cambia si la caja no tiene movimientos.',
+    inputSchema: z.object({
+      caja: z.string(), nombre: z.string().min(2).max(60).optional(), tipo: z.enum(['efectivo', 'banco', 'billetera_digital']).optional(),
+      banco: z.string().max(60).optional(), ultimos_4_digitos: z.string().regex(/^\d{4}$/).optional(), notas: z.string().max(300).optional(),
+      activa: z.boolean().optional(), saldo_inicial: z.number().min(0).optional(),
+    }), annotations: WRITE,
+  }, async (a) => {
+    const id = await defaultCash(a.caja);
+    const c = await api('PATCH', `/cash-accounts/${id}`, { body: Object.fromEntries(Object.entries({ name: a.nombre, type: a.tipo, bankName: a.banco, accountMask: a.ultimos_4_digitos, notes: a.notas, isActive: a.activa, openingBalance: a.saldo_inicial != null ? cents(a.saldo_inicial) : undefined }).filter(([, v]) => v !== undefined)) });
+    return ok({ nombre: c.name, tipo: c.type, activa: c.isActive }, `Caja ${c.name} actualizada.`);
+  });
+
+  server.registerTool('eliminar_caja', {
+    title: 'Eliminar caja',
+    description: 'Elimina una caja SOLO si nunca tuvo pagos ni movimientos. Si tiene historial, la API lo impide: ofrece desactivarla con editar_caja.',
+    inputSchema: z.object({ caja: z.string() }), annotations: DANGER,
+  }, async ({ caja }) => {
+    const id = await defaultCash(caja);
+    await api('DELETE', `/cash-accounts/${id}`);
+    return ok({ eliminada: true }, `Caja ${caja} eliminada.`);
+  });
+
+  server.registerTool('movimiento_caja', {
+    title: 'Ingreso o egreso de caja',
+    description: 'Registra dinero que entra (aporte de capital, otros ingresos) o sale (gastos, arriendo, nómina, retiros) de una caja, con concepto y soporte.',
+    inputSchema: z.object({
+      caja: z.string(), tipo: z.enum(['ingreso', 'egreso']), valor: z.number().positive(), concepto: z.string().min(3).max(200),
+      categoria: z.string().max(60).optional(), referencia: z.string().max(80).optional().describe('Factura o comprobante'), fecha: z.string().optional(),
+    }), annotations: WRITE,
+  }, async (a) => {
+    const id = await defaultCash(a.caja);
+    await api('POST', `/cash-accounts/${id}/movements`, { body: { type: a.tipo, amount: cents(a.valor), concept: a.concepto, ...(a.categoria && { category: a.categoria }), ...(a.referencia && { reference: a.referencia }), ...(a.fecha && { date: a.fecha }) } });
+    return ok({ caja: a.caja, tipo: a.tipo, valor: a.valor }, `${a.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'} de ${a.valor} registrado en ${a.caja}.`);
+  });
+
+  server.registerTool('trasladar_entre_cajas', {
+    title: 'Traslado entre cajas',
+    description: 'Pasa dinero de una caja a otra (ej. consignar el efectivo del día en el banco). Crea los dos movimientos enlazados.',
+    inputSchema: z.object({ desde: z.string(), hacia: z.string(), valor: z.number().positive(), concepto: z.string().max(200).optional(), fecha: z.string().optional() }), annotations: WRITE,
+  }, async (a) => {
+    const [from, to] = await Promise.all([defaultCash(a.desde), defaultCash(a.hacia)]);
+    await api('POST', `/cash-accounts/${from}/transfer`, { body: { toCashAccountId: to, amount: cents(a.valor), ...(a.concepto && { concept: a.concepto }), ...(a.fecha && { date: a.fecha }) } });
+    return ok({ desde: a.desde, hacia: a.hacia, valor: a.valor }, `Traslado de ${a.valor} de ${a.desde} a ${a.hacia}.`);
+  });
+
+  server.registerTool('cerrar_caja', {
+    title: 'Arqueo y cierre de caja',
+    description: 'Sin dinero_contado: muestra cuánto debería haber en la caja al cierre del día. Con dinero_contado: cierra la caja (registra sobrante o faltante y bloquea registrar en fechas anteriores). Pide al usuario contar el dinero antes de cerrar.',
+    inputSchema: z.object({ caja: z.string(), fecha: z.string().optional(), dinero_contado: z.number().min(0).optional(), observaciones: z.string().max(500).optional() }),
+    annotations: DANGER,
+  }, async (a) => {
+    const id = await defaultCash(a.caja);
+    if (a.dinero_contado == null) {
+      const p = await api('GET', `/cash-accounts/${id}/closings/preview`, { query: { date: a.fecha } });
+      return ok({ fecha: day(p.date), desde_cierre: day(p.lastClosingDate), saldo_inicial: pesos(p.opening), pagos: pesos(p.payments), otros_ingresos: pesos(p.inflows), salidas: pesos(p.outflows), deberia_haber: pesos(p.expected) },
+        `En ${a.caja} debería haber ${pesos(p.expected)}. Cuenta el dinero y dime el valor para cerrar.`);
+    }
+    const k = await api('POST', `/cash-accounts/${id}/closings`, { body: { countedBalance: cents(a.dinero_contado), ...(a.fecha && { date: a.fecha }), ...(a.observaciones && { notes: a.observaciones }) } });
+    return ok({ fecha: day(k.date), esperado: pesos(k.expectedBalance), contado: pesos(k.countedBalance), diferencia: pesos(k.difference) },
+      k.difference === 0 ? 'Caja cerrada: cuadra exacto.' : `Caja cerrada con ${k.difference > 0 ? 'sobrante' : 'faltante'} de ${pesos(Math.abs(k.difference))}.`);
   });
 
   // ================================================================ EQUIPO

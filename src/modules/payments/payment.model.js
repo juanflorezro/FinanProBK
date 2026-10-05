@@ -34,7 +34,11 @@ const paymentSchema = createSchema({
   appliedPrincipal: money(),
   unappliedAmount: money(), // saldo a favor
 
-  triggeredReschedule: { type: Boolean, default: false }, // abono extraordinario que regeneró el plan
+  triggeredReschedule: { type: Boolean, default: false }, // abono extraordinario o liquidación que cambió el plan
+  applyTo: enumOf(['automatico', 'cuotas', 'intereses', 'capital', 'liquidacion'], { default: 'automatico' }),
+  capitalEffect: enumOf(['reducir_cuota', 'reducir_plazo']),
+  targetNumbers: [Number],
+  notes: { type: String, maxlength: 300 },
   receiptPdfKey: String,
 });
 

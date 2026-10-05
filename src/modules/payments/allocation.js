@@ -10,12 +10,19 @@ export const FIELDS = {
 };
 
 /**
+ * Modalidades de aplicación (applyTo):
+ *  'automatico'  cascada configurada sobre lo vencido y luego el sobrante según excessMode (por defecto)
+ *  'cuotas'      paga solo las cuotas elegidas (targetNumbers), cada una en el orden de la cascada
+ *  'intereses'   solo mora e intereses: lo vencido y el interés del período en curso
+ *  'capital'     abono extraordinario a capital (exige estar al día; ver payment.service)
+ * La liquidación total ('liquidacion') prepara las cuotas en el servicio y luego usa 'automatico'.
+ *
  * excessMode:
  *  'proximas_cuotas'  el sobrante paga las cuotas siguientes en orden
  *  'capital'          el sobrante va directo a capital (abono extraordinario)
  * Por defecto: abonos_libres → capital ; planes fijos → proximas_cuotas
  */
-export function allocatePayment({ loan, installments, amount, asOf, waterfall = DEFAULT_WATERFALL, excessMode }) {
+export function allocatePayment({ loan, installments, amount, asOf, waterfall = DEFAULT_WATERFALL, excessMode, applyTo = 'automatico', targetNumbers = [] }) {
   let remaining = amount;
   let order = 0;
   const allocations = [];
@@ -37,6 +44,37 @@ export function allocatePayment({ loan, installments, amount, asOf, waterfall = 
     .sort((a, b) => a.number - b.number);
   const exigible = open.filter((i) => i.dueDate <= asOf);
   const future = open.filter((i) => i.dueDate > asOf);
+
+  const finish = (extraordinaryCapital = 0) => {
+    const unapplied = remaining;
+    if (unapplied > 0) allocations.push({ installmentId: null, component: 'saldo_a_favor', amount: unapplied, order: ++order });
+    return { allocations, totals, unapplied, needsReschedule: extraordinaryCapital > 0 && loan.amortization !== 'abonos_libres' };
+  };
+
+  if (applyTo === 'cuotas') {
+    const wanted = new Set(targetNumbers.map(Number));
+    for (const inst of open.filter((i) => wanted.has(i.number))) for (const c of waterfall) apply(inst, c);
+    return finish();
+  }
+
+  if (applyTo === 'intereses') {
+    const interestFirst = waterfall.filter((c) => c === 'mora' || c === 'interes');
+    for (const inst of exigible) for (const c of interestFirst) apply(inst, c);
+    if (future[0]) for (const c of interestFirst) apply(future[0], c); // interés del período en curso
+    return finish();
+  }
+
+  if (applyTo === 'capital') {
+    // Abono extraordinario: no toca intereses; el servicio exige que no haya nada vencido
+    const capitalRoom = loan.balancePrincipal;
+    const extraordinaryCapital = Math.min(remaining, Math.max(capitalRoom, 0));
+    if (extraordinaryCapital > 0) {
+      remaining -= extraordinaryCapital;
+      totals.capital += extraordinaryCapital;
+      allocations.push({ installmentId: null, component: 'capital', amount: extraordinaryCapital, order: ++order });
+    }
+    return finish(extraordinaryCapital);
+  }
 
   // 1. Lo vencido, cuota por cuota, en el orden de la cascada
   for (const inst of exigible) for (const c of waterfall) apply(inst, c);
@@ -67,13 +105,5 @@ export function allocatePayment({ loan, installments, amount, asOf, waterfall = 
   }
 
   // 3. Lo que sobre queda como saldo a favor
-  const unapplied = remaining;
-  if (unapplied > 0) allocations.push({ installmentId: null, component: 'saldo_a_favor', amount: unapplied, order: ++order });
-
-  return {
-    allocations,
-    totals,
-    unapplied,
-    needsReschedule: extraordinaryCapital > 0 && loan.amortization !== 'abonos_libres',
-  };
+  return finish(extraordinaryCapital);
 }
