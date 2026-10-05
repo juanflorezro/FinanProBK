@@ -5,7 +5,7 @@ import { nextSeq } from '../counters/counter.model.js';
 import { withTransaction } from '../../db/withTransaction.js';
 import { getContext } from '../../db/context.js';
 import { allocatePayment, DEFAULT_WATERFALL, FIELDS } from './allocation.js';
-import { accrueLateInterest, recomputeSummary, nextRollingRows, computePayoff, prepareLiquidation } from '../loans/loan.logic.js';
+import { accrueLateInterest, recomputeSummary, nextRollingRows, computePayoff, prepareLiquidation, prorateAfterCapital } from '../loans/loan.logic.js';
 import { assertCashOpen } from '../cash/cash.service.js';
 import { getInstallments, createInstallments, saveModified, applyReschedule, httpError } from '../loans/loan.service.js';
 
@@ -84,7 +84,11 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
     }
     loan.balancePrincipal -= totals.capital;
 
+    const currentBefore = installments.filter((i) => !['pagada', 'anulada', 'condonada'].includes(i.status) && i.dueDate > asOf).sort((a, b) => a.number - b.number)[0];
     if (needsReschedule) installments = await applyReschedule(loan, installments, asOf, session, capitalEffect);
+    // Abono a capital: el interés del período en curso se ajusta por los días (ver prorateAfterCapital)
+    const extraordinary = allocations.filter((a) => a.component === 'capital' && !a.installmentId).reduce((x, a) => x + a.amount, 0);
+    if (extraordinary > 0) prorateAfterCapital(loan, installments, asOf, extraordinary, { regenerated: currentBefore?.status === 'anulada' });
     const rolling = await createInstallments(loan, nextRollingRows(loan, installments, asOf), session);
     installments = [...installments, ...rolling];
 

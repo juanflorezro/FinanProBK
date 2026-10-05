@@ -2,13 +2,13 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import mongoose from 'mongoose';
 
 // Modalidades de pago profesionales: cuotas, intereses, capital (reducir cuota / plazo) y liquidación.
-let buildSchedule, allocatePayment, rescheduleRows, computePayoff, prepareLiquidation, recomputeSummary, Installment, Loan, deriveRates;
+let buildSchedule, allocatePayment, rescheduleRows, computePayoff, prepareLiquidation, recomputeSummary, prorateAfterCapital, Installment, Loan, deriveRates;
 
 beforeAll(async () => {
   Object.assign(process.env, { MONGODB_URI: 'mongodb://localhost/test', JWT_ACCESS_SECRET: 'a'.repeat(32), JWT_REFRESH_SECRET: 'b'.repeat(32), DATA_HASH_SECRET: 'c'.repeat(32), GOOGLE_CLIENT_ID: 't' });
   ({ buildSchedule } = await import('../src/modules/loans/schedule.js'));
   ({ allocatePayment } = await import('../src/modules/payments/allocation.js'));
-  ({ rescheduleRows, computePayoff, prepareLiquidation, recomputeSummary } = await import('../src/modules/loans/loan.logic.js'));
+  ({ rescheduleRows, computePayoff, prepareLiquidation, recomputeSummary, prorateAfterCapital } = await import('../src/modules/loans/loan.logic.js'));
   ({ Installment } = await import('../src/modules/loans/installment.model.js'));
   ({ Loan } = await import('../src/modules/loans/loan.model.js'));
   ({ deriveRates } = await import('../src/utils/rates.js'));
@@ -157,5 +157,40 @@ describe('pagar conceptos de ciertos períodos', () => {
     expect(insts[0].lateInterestPaid).toBe(3_000 * M);
     expect(insts[1].lateInterestPaid).toBe(1_000 * M);
     expect(r.totals.interes).toBe(0);
+  });
+});
+
+
+describe('caso guía: 200.000 al 10% mensual', () => {
+  function libre() {
+    const loan = new Loan({ orgId: oid(), loanNumber: 'T2', borrowerId: oid(), status: 'al_dia', principal: 200_000 * M, rate: '10', rateBasis: 'mensual', frequency: 'mensual', amortization: 'abonos_libres', disbursementDate: D('2026-10-05') });
+    Object.assign(loan, deriveRates({ rate: '10', rateBasis: 'mensual', rateKind: 'efectiva', frequency: 'mensual' }));
+    loan.balancePrincipal = loan.principal;
+    const rows = buildSchedule({ principal: loan.principal, ratePerPeriod: loan.ratePerPeriod, amortization: 'abonos_libres', firstDueDate: D('2026-11-05'), frequency: 'mensual' });
+    return { loan, insts: rows.map((r) => new Installment({ ...r, orgId: loan.orgId, loanId: loan._id })) };
+  }
+
+  it('abono a capital de 50.000 el día 10: el interés del mes baja por los 21 días restantes', () => {
+    const { loan, insts } = libre();
+    expect(insts[0].interestDue).toBe(20_000 * M);
+    const r = allocatePayment({ loan, installments: insts, amount: 50_000 * M, asOf: D('2026-10-15'), applyTo: 'capital' });
+    loan.balancePrincipal -= r.totals.capital;
+    prorateAfterCapital(loan, insts, D('2026-10-15'), r.totals.capital);
+    // 20.000 - 50.000 x 10% x 21/31 = 16.612,90
+    expect(insts[0].interestDue).toBe(1_661_290);
+  });
+
+  it('pago total descuenta los intereses pagados por adelantado', () => {
+    const { loan, insts } = setup({ amortization: 'interes_simple', termCount: 4, principal: 200_000 });
+    // paga por adelantado el interés de las cuotas 2 y 3
+    allocatePayment({ loan, installments: insts, amount: 30_000 * M, asOf: D('2026-01-10'), applyTo: 'cuotas', targetNumbers: [2, 3], components: ['interes'] });
+    const p = computePayoff(loan, insts, D('2026-01-10'));
+    expect(p.prepaidInterestCredit).toBe(insts[1].interestPaid + insts[2].interestPaid);
+    expect(p.total).toBe(200_000 * M - p.prepaidInterestCredit + p.currentInterest);
+    prepareLiquidation(loan, insts, D('2026-01-10'), p);
+    const r = allocatePayment({ loan, installments: insts, amount: p.total, asOf: D('2026-01-10'), excessMode: 'proximas_cuotas' });
+    loan.balancePrincipal -= r.totals.capital;
+    expect(loan.balancePrincipal).toBe(0);
+    expect(r.unapplied).toBe(0);
   });
 });

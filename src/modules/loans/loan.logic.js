@@ -141,11 +141,27 @@ export function rescheduleRows(loan, installments, asOf, effect = 'reducir_cuota
  * Liquidación (pago total anticipado) a una fecha. Ley 1555 de 2012: sin penalidad y con
  * intereses solo hasta el día del pago: el interés del período en curso se cobra por los días corridos.
  */
+/** Días del período en curso de una cuota futura: desde el vencimiento anterior (o el desembolso). */
+function periodOf(loan, active, next, asOf) {
+  const prev = active.filter((i) => i.dueDate <= asOf && i._id !== next._id).at(-1);
+  const start = prev?.dueDate ?? loan.disbursementDate ?? asOf;
+  const days = Math.max(daysBetween(start, next.dueDate), 1);
+  const elapsed = Math.min(Math.max(daysBetween(start, asOf), 0), days);
+  return { start, days, elapsed };
+}
+
+/**
+ * Liquidación (pago total anticipado) a una fecha. Ley 1555 de 2012: sin penalidad y con
+ * intereses solo hasta el día del pago:
+ *  - el interés del período en curso se cobra por los días corridos;
+ *  - los intereses pagados por adelantado (de días que no corrieron o de cuotas futuras) se
+ *    descuentan del capital; si superan el capital, quedan como saldo a favor del deudor.
+ */
 export function computePayoff(loan, installments, asOf) {
   const active = installments.filter((i) => !['anulada', 'condonada'].includes(i.status)).sort((a, b) => a.number - b.number);
   const open = active.filter((i) => i.status !== 'pagada');
   const exigible = open.filter((i) => i.dueDate <= asOf);
-  const future = open.filter((i) => i.dueDate > asOf);
+  const future = active.filter((i) => i.dueDate > asOf); // incluye cuotas futuras ya pagadas por adelantado
   const pend = (i, due, paid) => Math.max(i[due] - i[paid], 0);
 
   const late = sum(open, (i) => pend(i, 'lateInterestAccrued', 'lateInterestPaid'));
@@ -153,39 +169,80 @@ export function computePayoff(loan, installments, asOf) {
   const overdueInterest = sum(exigible, (i) => pend(i, 'interestDue', 'interestPaid'));
   const overduePrincipal = sum(exigible, (i) => pend(i, 'principalDue', 'principalPaid'));
 
+  let periodInterest = 0;
   let currentInterest = 0;
+  let prepaidInterestCredit = 0;
   let periodStart = null;
   const next = future[0];
   if (next) {
-    const prev = active.filter((i) => i.dueDate <= asOf).at(-1);
-    periodStart = prev?.dueDate ?? loan.disbursementDate ?? asOf;
-    const periodDays = Math.max(daysBetween(periodStart, next.dueDate), 1);
-    const elapsed = Math.min(Math.max(daysBetween(periodStart, asOf), 0), periodDays);
-    currentInterest = Math.max(Math.round(next.interestDue * elapsed / periodDays) - next.interestPaid, 0);
+    const p = periodOf(loan, active, next, asOf);
+    periodStart = p.start;
+    periodInterest = Math.round(next.interestDue * p.elapsed / p.days);
+    currentInterest = Math.max(periodInterest - next.interestPaid, 0);
+    prepaidInterestCredit = Math.max(next.interestPaid - periodInterest, 0) + sum(future.slice(1), (i) => i.interestPaid);
   }
-  const principal = Math.max(loan.balancePrincipal, 0);
+  const balance = Math.max(loan.balancePrincipal, 0);
+  const principal = Math.max(balance - prepaidInterestCredit, 0);
+  const refund = Math.max(prepaidInterestCredit - balance, 0);
   return {
-    asOf, principal, overduePrincipal, overdueInterest, currentInterest, lateInterest: late, fees,
-    total: principal + overdueInterest + currentInterest + late + fees,
+    asOf, principal, overduePrincipal, overdueInterest, currentInterest, periodInterest, lateInterest: late, fees,
+    prepaidInterestCredit, refund,
+    total: Math.max(principal + overdueInterest + currentInterest + late + fees - refund, 0),
     periodStart, nextInstallmentId: next?._id ?? null,
   };
 }
 
 /**
- * Prepara las cuotas para la liquidación: la cuota del período en curso queda con el interés
- * por días corridos y todo el capital pendiente; las demás cuotas futuras se anulan.
+ * Prepara las cuotas para la liquidación: la cuota del período en curso queda con el interés por
+ * días corridos y todo el capital pendiente; las demás cuotas futuras se anulan y lo que ya se les
+ * había pagado (capital e intereses adelantados) se abona al capital de la cuota en curso.
  * Devuelve las cuotas anuladas (el servicio las guarda).
  */
 export function prepareLiquidation(loan, installments, asOf, payoff) {
-  const open = installments.filter((i) => !['pagada', 'anulada', 'condonada'].includes(i.status)).sort((a, b) => a.number - b.number);
-  const exigible = open.filter((i) => i.dueDate <= asOf);
-  const future = open.filter((i) => i.dueDate > asOf);
+  const active = installments.filter((i) => !['anulada', 'condonada'].includes(i.status)).sort((a, b) => a.number - b.number);
+  const exigible = active.filter((i) => i.status !== 'pagada' && i.dueDate <= asOf);
+  const future = active.filter((i) => i.dueDate > asOf);
   if (!future.length) return [];
   const [next, ...rest] = future;
   const exigiblePrincipal = sum(exigible, (i) => Math.max(i.principalDue - i.principalPaid, 0));
-  next.interestDue = next.interestPaid + payoff.currentInterest;
+
+  // Intereses de más: los de días no corridos en la cuota en curso y todos los de cuotas futuras
+  const extraInterest = Math.max(next.interestPaid - payoff.periodInterest, 0);
+  const restInterest = sum(rest, (i) => i.interestPaid);
+  const restPrincipal = sum(rest, (i) => i.principalPaid);
+  const credit = extraInterest + restInterest;
+
+  next.interestPaid -= extraInterest;
+  next.interestDue = Math.max(payoff.periodInterest, next.interestPaid);
+  next.principalPaid += restPrincipal + credit;            // se reclasifica como abono a capital
+  loan.balancePrincipal = Math.max(loan.balancePrincipal - credit, 0);
   next.principalDue = next.principalPaid + Math.max(loan.balancePrincipal - exigiblePrincipal, 0);
+  if (next.principalDue < next.principalPaid) next.principalDue = next.principalPaid;
   next.dueDate = asOf; // se vuelve exigible hoy
+  next.status = 'pendiente';
   for (const i of rest) i.status = 'anulada';
   return rest;
+}
+
+/**
+ * Después de un abono extraordinario a capital, ajusta el interés del período en curso por días:
+ *  - abonos libres: el interés ya generado baja en lo que corresponde al abono por los días que faltan;
+ *  - planes fijos: la cuota regenerada suma el interés del abono por los días que ya corrieron
+ *    (el deudor tuvo ese dinero hasta hoy).
+ * No baja de lo que ya se pagó de interés. regenerated indica si la cuota en curso se volvió a calcular.
+ */
+export function prorateAfterCapital(loan, installments, asOf, abono, { regenerated = false } = {}) {
+  if (!abono || loan.interestBase === 'capital_inicial' && loan.amortization === 'abonos_libres') return null;
+  const active = installments.filter((i) => !['anulada', 'condonada'].includes(i.status)).sort((a, b) => a.number - b.number);
+  const current = active.find((i) => i.dueDate > asOf && i.status !== 'pagada');
+  if (!current) return null;
+  const { days, elapsed } = periodOf(loan, active, current, asOf);
+  const rate = Number(loan.ratePerPeriod) / 100;
+  if (loan.amortization === 'abonos_libres') {
+    const reduce = Math.round(abono * rate * (days - elapsed) / days);
+    current.interestDue = Math.max(current.interestDue - reduce, current.interestPaid);
+  } else if (regenerated) {
+    current.interestDue += Math.round(abono * rate * elapsed / days);
+  }
+  return current;
 }
