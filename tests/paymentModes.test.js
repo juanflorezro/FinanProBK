@@ -40,14 +40,22 @@ describe('aplicar pago a cuotas elegidas', () => {
 });
 
 describe('abono solo a intereses', () => {
-  it('paga mora e interés vencido y el interés del período en curso, nunca capital', () => {
+  it('paga mora, interés vencido, el período en curso y adelanta intereses en orden, nunca capital', () => {
     const { loan, insts } = setup();
     insts[0].lateInterestAccrued = 5_000 * M;
-    const r = allocatePayment({ loan, installments: insts, amount: 1_000_000 * M, asOf: D('2026-02-10'), applyTo: 'intereses' });
+    const twoPeriods = 5_000 * M + insts[0].interestDue + insts[1].interestDue;
+    const r = allocatePayment({ loan, installments: insts, amount: twoPeriods + 1_000 * M, asOf: D('2026-02-10'), applyTo: 'intereses' });
     expect(r.totals.capital).toBe(0);
     expect(r.totals.mora).toBe(5_000 * M);
-    expect(r.totals.interes).toBe(insts[0].interestDue + insts[1].interestDue);
-    expect(r.unapplied).toBeGreaterThan(0); // el servicio rechaza si sobra
+    expect(insts[2].interestPaid).toBe(1_000 * M); // interés adelantado del período 3
+    expect(r.unapplied).toBe(0);
+  });
+
+  it('si el valor supera todos los intereses, sobra (el servicio lo rechaza)', () => {
+    const { loan, insts } = setup();
+    const r = allocatePayment({ loan, installments: insts, amount: 1_000_000 * M, asOf: D('2026-01-15'), applyTo: 'intereses' });
+    expect(r.totals.interes).toBe(insts.reduce((a, i) => a + i.interestDue, 0));
+    expect(r.unapplied).toBeGreaterThan(0);
   });
 });
 

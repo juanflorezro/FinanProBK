@@ -14,7 +14,8 @@ export const FIELDS = {
  *  'automatico'  cascada configurada sobre lo vencido y luego el sobrante según excessMode (por defecto)
  *  'cuotas'      paga solo las cuotas elegidas (targetNumbers), cada una en el orden de la cascada;
  *                con components se limita a ciertos conceptos (ej. solo 'interes' o 'mora' de esos períodos)
- *  'intereses'   solo mora e intereses: lo vencido y el interés del período en curso
+ *  'intereses'   solo mora e intereses: lo vencido, el período en curso y, si sobra, intereses
+ *                adelantados de los períodos siguientes en orden (nunca capital)
  *  'capital'     abono extraordinario a capital (exige estar al día; ver payment.service)
  * La liquidación total ('liquidacion') prepara las cuotas en el servicio y luego usa 'automatico'.
  *
@@ -63,7 +64,8 @@ export function allocatePayment({ loan, installments, amount, asOf, waterfall = 
   if (applyTo === 'intereses') {
     const interestFirst = waterfall.filter((c) => c === 'mora' || c === 'interes');
     for (const inst of exigible) for (const c of interestFirst) apply(inst, c);
-    if (future[0]) for (const c of interestFirst) apply(future[0], c); // interés del período en curso
+    // período en curso y luego intereses adelantados, período por período
+    for (const inst of future) for (const c of interestFirst) apply(inst, c);
     return finish();
   }
 

@@ -80,7 +80,7 @@ export function registerPayment(input, { waterfall = DEFAULT_WATERFALL, excessMo
       throw httpError(400, 'COMPONENT_EXCEEDED', `En esas cuotas solo hay ${fmt(amount - unapplied)} de ${components.map((c) => names[c]).join(' y ')} por pagar.`);
     }
     if (applyTo === 'intereses' && unapplied > 0) {
-      throw httpError(400, 'INTEREST_EXCEEDED', `Solo hay ${fmt(amount - unapplied)} de intereses y mora para pagar hoy. Para abonar el resto usa "abono a capital" o "automático".`);
+      throw httpError(400, 'INTEREST_EXCEEDED', `Los intereses y la mora de todas las cuotas suman ${fmt(amount - unapplied)}. Para abonar el resto usa "abono a capital" o "automático".`);
     }
     loan.balancePrincipal -= totals.capital;
 
